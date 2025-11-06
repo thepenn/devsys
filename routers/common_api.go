@@ -1,0 +1,54 @@
+package routers
+
+import (
+	"github.com/emicklei/go-restful/v3"
+
+	"github.com/kuzane/go-devops/internal/config"
+	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
+	"github.com/kuzane/go-devops/service"
+)
+
+type Routers struct {
+	health   *health
+	web      *webHandler
+	auth     *authRouter
+	repos    *repoRouter
+	system   *systemRouter
+	services *service.Services
+	cfg      *config.Config
+}
+
+func NewRouters(cfg *config.Config, services *service.Services, authMW *authmw.Middleware) *Routers {
+	return &Routers{
+		health:   &health{},
+		web:      &webHandler{},
+		auth:     newAuthRouter(services, authMW),
+		repos:    newRepoRouter(services, authMW),
+		system:   newSystemRouter(services, authMW),
+		services: services,
+		cfg:      cfg,
+	}
+}
+
+func (r *Routers) Router(register func(string) *restful.WebService) []*restful.WebService {
+	var ws []*restful.WebService
+
+	{
+		sysTags := []string{"系统"}
+		ws = append(ws, r.health.router(register, sysTags)...)
+		ws = append(ws, r.web.router(register, sysTags)...)
+		ws = append(ws, r.system.router(register, sysTags)...)
+	}
+
+	{
+		authTags := []string{"认证"}
+		ws = append(ws, r.auth.router(register, authTags)...)
+	}
+
+	{
+		repoTags := []string{"仓库"}
+		ws = append(ws, r.repos.router(register, repoTags)...)
+	}
+
+	return ws
+}

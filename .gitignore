@@ -1,0 +1,26 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Shell scripts
+script/test/*.sh
+*.sh
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+
+# Binary
+onekey-alert
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# Test pipeline
+.test-pipeline.yaml
