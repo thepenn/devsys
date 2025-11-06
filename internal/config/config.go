@@ -71,6 +71,7 @@ type GitLab struct {
 	RedirectURL  string `envconfig:"SERVER_GITLAB_REDIRECT"`
 	Scopes       string `envconfig:"SERVER_GITLAB_SCOPES" default:"read_user api"`
 	SkipVerify   bool   `envconfig:"SERVER_GITLAB_SKIP_VERIFY" default:"false"`
+	Organizations string `envconfig:"SERVER_GITLAB_ORGS"`
 }
 
 type Gitee struct {
@@ -81,6 +82,7 @@ type Gitee struct {
 	RedirectURL  string `envconfig:"SERVER_GITEE_REDIRECT"`
 	Scopes       string `envconfig:"SERVER_GITEE_SCOPES" default:"user_info projects"`
 	SkipVerify   bool   `envconfig:"SERVER_GITEE_SKIP_VERIFY" default:"false"`
+	Organizations string `envconfig:"SERVER_GITEE_ORGS"`
 }
 
 type Gitea struct {
@@ -91,6 +93,7 @@ type Gitea struct {
 	RedirectURL  string `envconfig:"SERVER_GITEA_REDIRECT"`
 	Scopes       string `envconfig:"SERVER_GITEA_SCOPES" default:"read:user user:email repo"`
 	SkipVerify   bool   `envconfig:"SERVER_GITEA_SKIP_VERIFY" default:"false"`
+	Organizations string `envconfig:"SERVER_GITEA_ORGS"`
 }
 
 type Auth struct {

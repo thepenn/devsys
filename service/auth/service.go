@@ -55,6 +55,10 @@ type Service struct {
 	githubAPIBase      string
 	githubOrgs         []string
 	githubIncludeForks bool
+
+	gitlabOrgs []string
+	giteaOrgs  []string
+	giteeOrgs  []string
 }
 
 type giteeUser struct {
@@ -150,6 +154,9 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 	var githubAPIBase string
 	var githubOrgs []string
 	var githubIncludeForks bool
+	var gitlabOrgs []string
+	var giteaOrgs []string
+	var giteeOrgs []string
 	switch provider {
 	case providerGitHub:
 		if !cfg.Git.GitHub.Enabled {
@@ -173,6 +180,7 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 			scopes = []string{"read_user", "api"}
 		}
 		httpClient = newHTTPClient(cfg.Git.GitLab.SkipVerify)
+		gitlabOrgs = splitAndTrim(cfg.Git.GitLab.Organizations, ",")
 	case providerGitee:
 		if !cfg.Git.Gitee.Enabled {
 			return nil, errors.New("gitee authentication disabled")
@@ -182,6 +190,7 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 			scopes = []string{"user_info", "projects"}
 		}
 		httpClient = newHTTPClient(cfg.Git.Gitee.SkipVerify)
+		giteeOrgs = splitAndTrim(cfg.Git.Gitee.Organizations, ",")
 	case providerGitea:
 		if !cfg.Git.Gitea.Enabled {
 			return nil, errors.New("gitea authentication disabled")
@@ -191,6 +200,7 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 			scopes = []string{"read:user", "user:email", "repo"}
 		}
 		httpClient = newHTTPClient(cfg.Git.Gitea.SkipVerify)
+		giteaOrgs = splitAndTrim(cfg.Git.Gitea.Organizations, ",")
 	default:
 		return nil, fmt.Errorf("unsupported auth provider: %s", provider)
 	}
@@ -210,6 +220,9 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 		githubAPIBase:      githubAPIBase,
 		githubOrgs:         githubOrgs,
 		githubIncludeForks: githubIncludeForks,
+		gitlabOrgs:         gitlabOrgs,
+		giteaOrgs:          giteaOrgs,
+		giteeOrgs:          giteeOrgs,
 	}, nil
 }
 
@@ -443,6 +456,14 @@ func (s *Service) syncGitLabRepository(ctx context.Context, userID int64, remote
 	project, _, err := client.Projects.GetProject(projectID, nil)
 	if err != nil {
 		return fmt.Errorf("fetch gitlab project: %w", err)
+	}
+
+	owner := gitLabProjectNamespace(project)
+	if !s.gitlabOrgAllowed(owner) {
+		if strings.TrimSpace(owner) == "" {
+			owner = "(unknown)"
+		}
+		return fmt.Errorf("gitlab project owner %s not permitted by configuration", owner)
 	}
 
 	repoData := convertGitLabProject(project)
@@ -803,6 +824,14 @@ func (s *Service) syncGiteeRepository(ctx context.Context, userID int64, remoteI
 		return err
 	}
 
+	if !s.giteeOrgAllowed(repoData.Owner) {
+		owner := repoData.Owner
+		if strings.TrimSpace(owner) == "" {
+			owner = "(unknown)"
+		}
+		return fmt.Errorf("gitee repository owner %s not permitted by configuration", owner)
+	}
+
 	return s.repos.SyncGitRepositories(ctx, forge.ID, userModel.ID, []repo.GitRepository{repoData}, true)
 }
 
@@ -957,6 +986,14 @@ func (s *Service) syncGiteaRepository(ctx context.Context, userID int64, remoteI
 	}
 
 	repoData := convertGiteaRepo(repository)
+	if !s.giteaOrgAllowed(repoData.Owner) {
+		owner := repoData.Owner
+		if strings.TrimSpace(owner) == "" {
+			owner = "(unknown)"
+		}
+		return fmt.Errorf("gitea repository owner %s not permitted by configuration", owner)
+	}
+
 	return s.repos.SyncGitRepositories(ctx, forge.ID, userModel.ID, []repo.GitRepository{repoData}, true)
 }
 
@@ -1002,6 +1039,13 @@ func (s *Service) listGiteaRepositories(ctx context.Context, client *gitea.Clien
 		}
 		for _, item := range items {
 			if item == nil {
+				continue
+			}
+			owner := ""
+			if item.Owner != nil {
+				owner = item.Owner.UserName
+			}
+			if !s.giteaOrgAllowed(owner) {
 				continue
 			}
 			repositories = append(repositories, convertGiteaRepo(item))
@@ -1095,6 +1139,9 @@ func (s *Service) listGitLabProjects(ctx context.Context, client *gitlab.Client)
 			if project == nil {
 				continue
 			}
+			if !s.gitlabOrgAllowed(gitLabProjectNamespace(project)) {
+				continue
+			}
 
 			repositories = append(repositories, convertGitLabProject(project))
 		}
@@ -1134,6 +1181,9 @@ func (s *Service) fetchGiteeRepos(ctx context.Context, accessToken string) ([]re
 		}
 
 		for _, item := range items {
+			if !s.giteeOrgAllowed(item.Owner.Login) {
+				continue
+			}
 			repositories = append(repositories, convertGiteeRepo(item))
 		}
 
@@ -1445,11 +1495,31 @@ func (s *Service) githubAPI(ctx context.Context, client *http.Client, method, pa
 }
 
 func (s *Service) githubOrgAllowed(owner string) bool {
-	if len(s.githubOrgs) == 0 {
+	return orgAllowed(owner, s.githubOrgs)
+}
+
+func (s *Service) gitlabOrgAllowed(owner string) bool {
+	return orgAllowed(owner, s.gitlabOrgs)
+}
+
+func (s *Service) giteaOrgAllowed(owner string) bool {
+	return orgAllowed(owner, s.giteaOrgs)
+}
+
+func (s *Service) giteeOrgAllowed(owner string) bool {
+	return orgAllowed(owner, s.giteeOrgs)
+}
+
+func orgAllowed(owner string, allowed []string) bool {
+	if len(allowed) == 0 {
 		return true
 	}
-	for _, org := range s.githubOrgs {
-		if strings.EqualFold(strings.TrimSpace(org), strings.TrimSpace(owner)) {
+	trimmedOwner := strings.TrimSpace(owner)
+	if trimmedOwner == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		if strings.EqualFold(trimmedOwner, strings.TrimSpace(candidate)) {
 			return true
 		}
 	}
@@ -1620,14 +1690,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func convertGitLabProject(project *gitlab.Project) repo.GitRepository {
-	owner := ""
-	if project.Namespace != nil && project.Namespace.Path != "" {
-		owner = project.Namespace.Path
-	}
-	if owner == "" && project.PathWithNamespace != "" {
-		parts := strings.Split(project.PathWithNamespace, "/")
-		owner = parts[0]
-	}
+	owner := gitLabProjectNamespace(project)
 
 	visibility := model.VisibilityPrivate
 	isPrivate := true
@@ -1653,6 +1716,33 @@ func convertGitLabProject(project *gitlab.Project) repo.GitRepository {
 		IsPrivate:     isPrivate,
 		ConfigPath:    project.CIConfigPath,
 	}
+}
+
+func gitLabProjectNamespace(project *gitlab.Project) string {
+	if project == nil {
+		return ""
+	}
+	if project.Namespace != nil {
+		if path := strings.TrimSpace(project.Namespace.Path); path != "" {
+			return path
+		}
+		if full := strings.TrimSpace(project.Namespace.FullPath); full != "" {
+			parts := strings.Split(full, "/")
+			if len(parts) > 0 {
+				return strings.TrimSpace(parts[0])
+			}
+		}
+		if name := strings.TrimSpace(project.Namespace.Name); name != "" {
+			return name
+		}
+	}
+	if combined := strings.TrimSpace(project.PathWithNamespace); combined != "" {
+		parts := strings.Split(combined, "/")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	return ""
 }
 
 func convertGiteeRepo(item giteeRepo) repo.GitRepository {
