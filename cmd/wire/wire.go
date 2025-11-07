@@ -8,18 +8,18 @@ import (
 
 	"github.com/google/wire"
 
-	"github.com/kuzane/go-devops/internal/cache"
-	"github.com/kuzane/go-devops/internal/config"
-	"github.com/kuzane/go-devops/internal/handler"
-	"github.com/kuzane/go-devops/internal/server"
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/routers"
-	adminmw "github.com/kuzane/go-devops/routers/middleware/admin"
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	"github.com/kuzane/go-devops/routers/middleware/metrics"
-	"github.com/kuzane/go-devops/service"
-	"github.com/kuzane/go-devops/service/migrate"
-	"github.com/kuzane/go-devops/service/pipeline/queue"
+	"github.com/thepenn/devsys/internal/cache"
+	"github.com/thepenn/devsys/internal/config"
+	"github.com/thepenn/devsys/internal/handler"
+	"github.com/thepenn/devsys/internal/server"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/routers"
+	adminmw "github.com/thepenn/devsys/routers/middleware/admin"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/routers/middleware/metrics"
+	"github.com/thepenn/devsys/service"
+	"github.com/thepenn/devsys/service/migrate"
+	"github.com/thepenn/devsys/service/pipeline/queue"
 )
 
 type App struct {

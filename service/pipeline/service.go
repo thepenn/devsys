@@ -27,12 +27,12 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/kuzane/go-devops/internal/cache"
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/model"
-	"github.com/kuzane/go-devops/service/pipeline/queue"
-	"github.com/kuzane/go-devops/service/pipeline/spec"
-	systemsvc "github.com/kuzane/go-devops/service/system"
+	"github.com/thepenn/devsys/internal/cache"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/model"
+	"github.com/thepenn/devsys/service/pipeline/queue"
+	"github.com/thepenn/devsys/service/pipeline/spec"
+	systemsvc "github.com/thepenn/devsys/service/system"
 )
 
 const pipelineCacheKey = "pipeline:%d"

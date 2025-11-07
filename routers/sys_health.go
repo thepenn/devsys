@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/kuzane/go-devops/routers/middleware/metrics"
+	"github.com/thepenn/devsys/routers/middleware/metrics"
 )
 
 var (

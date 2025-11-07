@@ -24,11 +24,11 @@ import (
 	"golang.org/x/oauth2"
 	githuboauth "golang.org/x/oauth2/github"
 
-	"github.com/kuzane/go-devops/internal/config"
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/model"
-	"github.com/kuzane/go-devops/service/repo"
-	"github.com/kuzane/go-devops/service/user"
+	"github.com/thepenn/devsys/internal/config"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/model"
+	"github.com/thepenn/devsys/service/repo"
+	"github.com/thepenn/devsys/service/user"
 	"gorm.io/gorm"
 )
 

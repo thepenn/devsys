@@ -8,9 +8,9 @@ import (
 	restfulOpenapi "github.com/emicklei/go-restful-openapi/v2"
 	"github.com/emicklei/go-restful/v3"
 
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	"github.com/kuzane/go-devops/service"
-	authsvc "github.com/kuzane/go-devops/service/auth"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/service"
+	authsvc "github.com/thepenn/devsys/service/auth"
 )
 
 type authRouter struct {

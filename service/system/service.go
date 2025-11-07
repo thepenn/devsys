@@ -16,8 +16,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/model"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/model"
 )
 
 const (

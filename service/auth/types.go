@@ -3,7 +3,7 @@ package auth
 import (
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/kuzane/go-devops/model"
+	"github.com/thepenn/devsys/model"
 )
 
 type AuthResponse struct {

@@ -7,10 +7,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/kuzane/go-devops/cmd/wire"
-	"github.com/kuzane/go-devops/internal/config"
-	"github.com/kuzane/go-devops/internal/logger"
-	"github.com/kuzane/go-devops/internal/utils"
+	"github.com/thepenn/devsys/cmd/wire"
+	"github.com/thepenn/devsys/internal/config"
+	"github.com/thepenn/devsys/internal/logger"
+	"github.com/thepenn/devsys/internal/utils"
 )
 
 func main() {

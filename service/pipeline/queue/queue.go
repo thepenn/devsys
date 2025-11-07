@@ -9,7 +9,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/kuzane/go-devops/model"
+	"github.com/thepenn/devsys/model"
 )
 
 var (

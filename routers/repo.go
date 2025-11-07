@@ -11,11 +11,11 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"gorm.io/gorm"
 
-	"github.com/kuzane/go-devops/model"
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	"github.com/kuzane/go-devops/service"
-	authsvc "github.com/kuzane/go-devops/service/auth"
-	pipelinesvc "github.com/kuzane/go-devops/service/pipeline"
+	"github.com/thepenn/devsys/model"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/service"
+	authsvc "github.com/thepenn/devsys/service/auth"
+	pipelinesvc "github.com/thepenn/devsys/service/pipeline"
 )
 
 type repoRouter struct {

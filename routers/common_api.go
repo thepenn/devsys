@@ -3,9 +3,9 @@ package routers
 import (
 	"github.com/emicklei/go-restful/v3"
 
-	"github.com/kuzane/go-devops/internal/config"
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	"github.com/kuzane/go-devops/service"
+	"github.com/thepenn/devsys/internal/config"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/service"
 )
 
 type Routers struct {

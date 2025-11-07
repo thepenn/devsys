@@ -5,8 +5,8 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	userService "github.com/kuzane/go-devops/service/user"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	userService "github.com/thepenn/devsys/service/user"
 )
 
 const (

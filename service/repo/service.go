@@ -11,8 +11,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/model"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/model"
 )
 
 type Service struct {

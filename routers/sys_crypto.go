@@ -10,10 +10,10 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"gorm.io/gorm"
 
-	"github.com/kuzane/go-devops/model"
-	adminmw "github.com/kuzane/go-devops/routers/middleware/admin"
-	authmw "github.com/kuzane/go-devops/routers/middleware/auth"
-	"github.com/kuzane/go-devops/service"
+	"github.com/thepenn/devsys/model"
+	adminmw "github.com/thepenn/devsys/routers/middleware/admin"
+	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/service"
 )
 
 var (

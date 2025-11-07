@@ -4,15 +4,15 @@ import (
 	"context"
 	"time"
 
-	"github.com/kuzane/go-devops/internal/cache"
-	"github.com/kuzane/go-devops/internal/config"
-	"github.com/kuzane/go-devops/internal/store"
-	"github.com/kuzane/go-devops/service/auth"
-	pipelineService "github.com/kuzane/go-devops/service/pipeline"
-	"github.com/kuzane/go-devops/service/pipeline/queue"
-	repoService "github.com/kuzane/go-devops/service/repo"
-	systemService "github.com/kuzane/go-devops/service/system"
-	userService "github.com/kuzane/go-devops/service/user"
+	"github.com/thepenn/devsys/internal/cache"
+	"github.com/thepenn/devsys/internal/config"
+	"github.com/thepenn/devsys/internal/store"
+	"github.com/thepenn/devsys/service/auth"
+	pipelineService "github.com/thepenn/devsys/service/pipeline"
+	"github.com/thepenn/devsys/service/pipeline/queue"
+	repoService "github.com/thepenn/devsys/service/repo"
+	systemService "github.com/thepenn/devsys/service/system"
+	userService "github.com/thepenn/devsys/service/user"
 )
 
 // Services aggregates the available service layer components.
