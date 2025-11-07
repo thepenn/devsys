@@ -64,35 +64,35 @@ type GitHub struct {
 }
 
 type GitLab struct {
-	Enabled      bool   `envconfig:"SERVER_GITLAB" default:"true"`
-	URL          string `envconfig:"SERVER_GITLAB_URL" default:"https://gitlab.com"`
-	ClientID     string `envconfig:"SERVER_GITLAB_CLIENT"`
-	ClientSecret string `envconfig:"SERVER_GITLAB_SECRET"`
-	RedirectURL  string `envconfig:"SERVER_GITLAB_REDIRECT"`
-	Scopes       string `envconfig:"SERVER_GITLAB_SCOPES" default:"read_user api"`
-	SkipVerify   bool   `envconfig:"SERVER_GITLAB_SKIP_VERIFY" default:"false"`
+	Enabled       bool   `envconfig:"SERVER_GITLAB" default:"true"`
+	URL           string `envconfig:"SERVER_GITLAB_URL" default:"https://gitlab.com"`
+	ClientID      string `envconfig:"SERVER_GITLAB_CLIENT"`
+	ClientSecret  string `envconfig:"SERVER_GITLAB_SECRET"`
+	RedirectURL   string `envconfig:"SERVER_GITLAB_REDIRECT"`
+	Scopes        string `envconfig:"SERVER_GITLAB_SCOPES" default:"read_user api"`
+	SkipVerify    bool   `envconfig:"SERVER_GITLAB_SKIP_VERIFY" default:"false"`
 	Organizations string `envconfig:"SERVER_GITLAB_ORGS"`
 }
 
 type Gitee struct {
-	Enabled      bool   `envconfig:"SERVER_GITEE" default:"false"`
-	URL          string `envconfig:"SERVER_GITEE_URL" default:"https://gitee.com"`
-	ClientID     string `envconfig:"SERVER_GITEE_CLIENT"`
-	ClientSecret string `envconfig:"SERVER_GITEE_SECRET"`
-	RedirectURL  string `envconfig:"SERVER_GITEE_REDIRECT"`
-	Scopes       string `envconfig:"SERVER_GITEE_SCOPES" default:"user_info projects"`
-	SkipVerify   bool   `envconfig:"SERVER_GITEE_SKIP_VERIFY" default:"false"`
+	Enabled       bool   `envconfig:"SERVER_GITEE" default:"false"`
+	URL           string `envconfig:"SERVER_GITEE_URL" default:"https://gitee.com"`
+	ClientID      string `envconfig:"SERVER_GITEE_CLIENT"`
+	ClientSecret  string `envconfig:"SERVER_GITEE_SECRET"`
+	RedirectURL   string `envconfig:"SERVER_GITEE_REDIRECT"`
+	Scopes        string `envconfig:"SERVER_GITEE_SCOPES" default:"user_info projects"`
+	SkipVerify    bool   `envconfig:"SERVER_GITEE_SKIP_VERIFY" default:"false"`
 	Organizations string `envconfig:"SERVER_GITEE_ORGS"`
 }
 
 type Gitea struct {
-	Enabled      bool   `envconfig:"SERVER_GITEA" default:"false"`
-	URL          string `envconfig:"SERVER_GITEA_URL" default:""`
-	ClientID     string `envconfig:"SERVER_GITEA_CLIENT"`
-	ClientSecret string `envconfig:"SERVER_GITEA_SECRET"`
-	RedirectURL  string `envconfig:"SERVER_GITEA_REDIRECT"`
-	Scopes       string `envconfig:"SERVER_GITEA_SCOPES" default:"read:user user:email repo"`
-	SkipVerify   bool   `envconfig:"SERVER_GITEA_SKIP_VERIFY" default:"false"`
+	Enabled       bool   `envconfig:"SERVER_GITEA" default:"false"`
+	URL           string `envconfig:"SERVER_GITEA_URL" default:""`
+	ClientID      string `envconfig:"SERVER_GITEA_CLIENT"`
+	ClientSecret  string `envconfig:"SERVER_GITEA_SECRET"`
+	RedirectURL   string `envconfig:"SERVER_GITEA_REDIRECT"`
+	Scopes        string `envconfig:"SERVER_GITEA_SCOPES" default:"read:user user:email repo"`
+	SkipVerify    bool   `envconfig:"SERVER_GITEA_SKIP_VERIFY" default:"false"`
 	Organizations string `envconfig:"SERVER_GITEA_ORGS"`
 }
 

@@ -40,10 +40,10 @@
       <div v-if="flatSteps.length" class="build-detail__flow">
         <template v-for="(step, idx) in flatSteps">
           <div :key="`step-card-${stepKey(step)}`" :class="['build-detail__flow-step', { 'build-detail__flow-step--active': currentStepId === stepKey(step) }]">
-            <span :class="['pipeline-status-bullet', `pipeline-status-bullet--${(step.state || '').toLowerCase()}`]" />
+            <span :class="['pipeline-status-bullet', stepBulletClass(step)]" />
             <div class="build-detail__flow-info">
               <span class="build-detail__flow-name">{{ step.name || `Step #${step.pid}` }}</span>
-              <span class="build-detail__flow-meta">{{ formatStatus(step.state) }} · {{ formatDuration(step.started, step.finished) }}</span>
+              <span class="build-detail__flow-meta">{{ stepStatusLabel(step) }} · {{ formatDuration(step.started, step.finished) }}</span>
             </div>
           </div>
           <span
@@ -66,7 +66,7 @@
                 :class="['build-detail__step-item', { 'build-detail__step-item--active': currentStepId === stepKey(step) }]"
                 @click="selectStep(step)"
               >
-                <span :class="['pipeline-status-bullet', `pipeline-status-bullet--${(step.state || '').toLowerCase()}`]" />
+                <span :class="['pipeline-status-bullet', stepBulletClass(step)]" />
                 <span class="build-detail__step-name">{{ step.name || `Step #${step.pid}` }}</span>
               </li>
             </ul>
@@ -78,7 +78,7 @@
           <div v-if="!currentStep" class="build-detail__logs-empty">
             请选择左侧的步骤查看日志。
           </div>
-          <template v-else-if="currentStepIsApproval">
+          <template v-else-if="currentStepIsApproval && stepHasRun(currentStep)">
             <header class="build-detail__logs-header">
               <div>
                 <h4>{{ currentStep.name || `Step #${currentStep.pid}` }}</h4>
@@ -135,12 +135,24 @@
               </div>
             </div>
           </template>
+          <template v-else-if="currentStepIsApproval">
+            <header class="build-detail__logs-header">
+              <div>
+                <h4>{{ currentStep.name || `Step #${currentStep.pid}` }}</h4>
+                <p class="build-detail__logs-meta">
+                  <span>状态：未执行</span>
+                  <span>耗时：—</span>
+                </p>
+              </div>
+            </header>
+            <div class="build-detail__logs-empty">当前审批步骤尚未进入执行阶段。</div>
+          </template>
           <template v-else>
             <header class="build-detail__logs-header">
               <div>
                 <h4>{{ currentStep.name || `Step #${currentStep.pid}` }}</h4>
                 <p class="build-detail__logs-meta">
-                  <span>状态：{{ formatStatus(currentStep.state) }}</span>
+                  <span>状态：{{ stepStatusLabel(currentStep) }}</span>
                   <span>耗时：{{ formatDuration(currentStep.started, currentStep.finished) }}</span>
                 </p>
               </div>
@@ -422,6 +434,44 @@ export default {
       link.click()
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
+    },
+    normalizeState(value) {
+      if (value === null || value === undefined) return ''
+      return String(value).trim().toLowerCase()
+    },
+    stepHasRun(step) {
+      if (!step) return false
+      return Number(step.started) > 0
+    },
+    stepVisualState(step) {
+      if (!this.stepHasRun(step)) {
+        return 'not-run'
+      }
+      const normalized = this.normalizeState(step && step.state)
+      if (normalized) {
+        return normalized
+      }
+      if (step && step.finished) {
+        return 'success'
+      }
+      return 'running'
+    },
+    stepBulletClass(step) {
+      const state = this.stepVisualState(step)
+      const classes = {
+        [`pipeline-status-bullet--${state}`]: true
+      }
+      if (state === 'not-run') {
+        classes['pipeline-status-bullet--empty'] = true
+      }
+      return classes
+    },
+    stepStatusLabel(step) {
+      const state = this.stepVisualState(step)
+      if (state === 'not-run') {
+        return '未执行'
+      }
+      return this.formatStatus(state)
     },
     formatStatus(value) {
       switch ((value || '').toLowerCase()) {
@@ -739,6 +789,14 @@ export default {
 
 .pipeline-status-bullet--pending {
   background: #facc15;
+}
+
+.pipeline-status-bullet--empty {
+  visibility: hidden;
+}
+.pipeline-status-bullet--not-run {
+  background: transparent;
+  border: 1px dashed rgba(148, 163, 184, 0.7);
 }
 
 .build-detail__logs {

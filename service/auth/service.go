@@ -46,6 +46,7 @@ type Service struct {
 	repos *repo.Service
 
 	provider   string
+	authProv   gitAuthProvider
 	sessionKey []byte
 	tokenTTL   time.Duration
 	scopes     []string
@@ -59,6 +60,14 @@ type Service struct {
 	gitlabOrgs []string
 	giteaOrgs  []string
 	giteeOrgs  []string
+}
+
+type gitAuthProvider interface {
+	Name() string
+	BeginAuth(ctx context.Context, redirect string) (string, string, error)
+	CompleteAuth(ctx context.Context, code, state string) (*AuthResponse, error)
+	SyncRepositories(ctx context.Context, userID int64) error
+	SyncRepository(ctx context.Context, userID int64, remoteID string) error
 }
 
 type giteeUser struct {
@@ -205,7 +214,7 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 		return nil, fmt.Errorf("unsupported auth provider: %s", provider)
 	}
 
-	return &Service{
+	service := &Service{
 		cfg:        cfg,
 		db:         db,
 		users:      users,
@@ -223,46 +232,35 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 		gitlabOrgs:         gitlabOrgs,
 		giteaOrgs:          giteaOrgs,
 		giteeOrgs:          giteeOrgs,
-	}, nil
+	}
+
+	prov, err := newGitProvider(service, provider)
+	if err != nil {
+		return nil, err
+	}
+	service.authProv = prov
+	return service, nil
 }
 
 func (s *Service) BeginGitLabAuth(ctx context.Context, redirect string) (string, string, error) {
-	switch s.provider {
-	case providerGitHub:
-		return s.beginGitHubAuth(ctx, redirect)
-	case providerGitee:
-		return s.beginGiteeAuth(ctx, redirect)
-	case providerGitea:
-		return s.beginGiteaAuth(ctx, redirect)
-	default:
-		return s.beginGitLabAuth(ctx, redirect)
+	if s.authProv == nil {
+		return "", "", errors.New("auth provider not configured")
 	}
+	return s.authProv.BeginAuth(ctx, redirect)
 }
 
 func (s *Service) CompleteGitLabAuth(ctx context.Context, code, state string) (*AuthResponse, error) {
-	switch s.provider {
-	case providerGitHub:
-		return s.completeGitHubAuth(ctx, code, state)
-	case providerGitee:
-		return s.completeGiteeAuth(ctx, code, state)
-	case providerGitea:
-		return s.completeGiteaAuth(ctx, code, state)
-	default:
-		return s.completeGitLabAuth(ctx, code, state)
+	if s.authProv == nil {
+		return nil, errors.New("auth provider not configured")
 	}
+	return s.authProv.CompleteAuth(ctx, code, state)
 }
 
 func (s *Service) SyncGitLabRepositories(ctx context.Context, userID int64) error {
-	switch s.provider {
-	case providerGitHub:
-		return s.syncGitHubRepositories(ctx, userID)
-	case providerGitee:
-		return s.syncGiteeRepositories(ctx, userID)
-	case providerGitea:
-		return s.syncGiteaRepositories(ctx, userID)
-	default:
-		return s.syncGitLabRepositories(ctx, userID)
+	if s.authProv == nil {
+		return errors.New("auth provider not configured")
 	}
+	return s.authProv.SyncRepositories(ctx, userID)
 }
 
 func (s *Service) SyncRepositories(ctx context.Context, userID int64) error {
@@ -270,16 +268,10 @@ func (s *Service) SyncRepositories(ctx context.Context, userID int64) error {
 }
 
 func (s *Service) SyncRepository(ctx context.Context, userID int64, remoteID string) error {
-	switch s.provider {
-	case providerGitHub:
-		return s.syncGitHubRepository(ctx, userID, remoteID)
-	case providerGitee:
-		return s.syncGiteeRepository(ctx, userID, remoteID)
-	case providerGitea:
-		return s.syncGiteaRepository(ctx, userID, remoteID)
-	default:
-		return s.syncGitLabRepository(ctx, userID, remoteID)
+	if s.authProv == nil {
+		return errors.New("auth provider not configured")
 	}
+	return s.authProv.SyncRepository(ctx, userID, remoteID)
 }
 
 func (s *Service) ParseToken(tokenString string) (*SessionClaims, error) {
@@ -1670,6 +1662,85 @@ func randomState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func newGitProvider(s *Service, name string) (gitAuthProvider, error) {
+	switch name {
+	case providerGitHub:
+		return &gitHubProvider{svc: s}, nil
+	case providerGitLab:
+		return &gitLabProvider{svc: s}, nil
+	case providerGitee:
+		return &gitGiteeProvider{svc: s}, nil
+	case providerGitea:
+		return &gitGiteaProvider{svc: s}, nil
+	default:
+		return nil, fmt.Errorf("unsupported auth provider: %s", name)
+	}
+}
+
+type gitHubProvider struct{ svc *Service }
+
+func (p *gitHubProvider) Name() string { return providerGitHub }
+func (p *gitHubProvider) BeginAuth(ctx context.Context, redirect string) (string, string, error) {
+	return p.svc.beginGitHubAuth(ctx, redirect)
+}
+func (p *gitHubProvider) CompleteAuth(ctx context.Context, code, state string) (*AuthResponse, error) {
+	return p.svc.completeGitHubAuth(ctx, code, state)
+}
+func (p *gitHubProvider) SyncRepositories(ctx context.Context, userID int64) error {
+	return p.svc.syncGitHubRepositories(ctx, userID)
+}
+func (p *gitHubProvider) SyncRepository(ctx context.Context, userID int64, remoteID string) error {
+	return p.svc.syncGitHubRepository(ctx, userID, remoteID)
+}
+
+type gitLabProvider struct{ svc *Service }
+
+func (p *gitLabProvider) Name() string { return providerGitLab }
+func (p *gitLabProvider) BeginAuth(ctx context.Context, redirect string) (string, string, error) {
+	return p.svc.beginGitLabAuth(ctx, redirect)
+}
+func (p *gitLabProvider) CompleteAuth(ctx context.Context, code, state string) (*AuthResponse, error) {
+	return p.svc.completeGitLabAuth(ctx, code, state)
+}
+func (p *gitLabProvider) SyncRepositories(ctx context.Context, userID int64) error {
+	return p.svc.syncGitLabRepositories(ctx, userID)
+}
+func (p *gitLabProvider) SyncRepository(ctx context.Context, userID int64, remoteID string) error {
+	return p.svc.syncGitLabRepository(ctx, userID, remoteID)
+}
+
+type gitGiteeProvider struct{ svc *Service }
+
+func (p *gitGiteeProvider) Name() string { return providerGitee }
+func (p *gitGiteeProvider) BeginAuth(ctx context.Context, redirect string) (string, string, error) {
+	return p.svc.beginGiteeAuth(ctx, redirect)
+}
+func (p *gitGiteeProvider) CompleteAuth(ctx context.Context, code, state string) (*AuthResponse, error) {
+	return p.svc.completeGiteeAuth(ctx, code, state)
+}
+func (p *gitGiteeProvider) SyncRepositories(ctx context.Context, userID int64) error {
+	return p.svc.syncGiteeRepositories(ctx, userID)
+}
+func (p *gitGiteeProvider) SyncRepository(ctx context.Context, userID int64, remoteID string) error {
+	return p.svc.syncGiteeRepository(ctx, userID, remoteID)
+}
+
+type gitGiteaProvider struct{ svc *Service }
+
+func (p *gitGiteaProvider) Name() string { return providerGitea }
+func (p *gitGiteaProvider) BeginAuth(ctx context.Context, redirect string) (string, string, error) {
+	return p.svc.beginGiteaAuth(ctx, redirect)
+}
+func (p *gitGiteaProvider) CompleteAuth(ctx context.Context, code, state string) (*AuthResponse, error) {
+	return p.svc.completeGiteaAuth(ctx, code, state)
+}
+func (p *gitGiteaProvider) SyncRepositories(ctx context.Context, userID int64) error {
+	return p.svc.syncGiteaRepositories(ctx, userID)
+}
+func (p *gitGiteaProvider) SyncRepository(ctx context.Context, userID int64, remoteID string) error {
+	return p.svc.syncGiteaRepository(ctx, userID, remoteID)
 }
 
 func newHTTPClient(skipVerify bool) *http.Client {

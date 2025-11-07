@@ -104,6 +104,7 @@
           </p>
           <!-- eslint-disable-next-line vue/html-self-closing -->
           <textarea
+            ref="dockerfileEditor"
             v-model="dockerfileDraft"
             class="pipeline-modal__textarea"
             spellcheck="false"
@@ -217,6 +218,7 @@ import {
 } from '@/api/project/pipeline'
 
 let CodeMirrorInstance = null
+let codeMirrorModesReady = false
 
 export default {
   name: 'ProjectPipeline',
@@ -254,6 +256,7 @@ export default {
       editorVisible: false,
       yamlEditor: null,
       dockerfileVisible: false,
+      dockerfileEditor: null,
       dockerfileDraft: '',
       dockerfileSaving: false,
       runModalVisible: false,
@@ -340,6 +343,7 @@ export default {
     if (typeof this.projectPipelineExpose === 'function') {
       this.projectPipelineExpose(null)
     }
+    this.destroyDockerfileEditor()
   },
   methods: {
     formatCommit(commit) {
@@ -359,22 +363,26 @@ export default {
       }
     },
     async ensureCodeMirror() {
-      if (CodeMirrorInstance) return CodeMirrorInstance
-      const imported = await import('codemirror')
-      await import('codemirror/mode/yaml/yaml')
-      const instance = imported.default || imported
-      // eslint-disable-next-line require-atomic-updates
-      CodeMirrorInstance = instance
-      return instance
+      if (!CodeMirrorInstance) {
+        const imported = await import('codemirror')
+        const instance = imported.default || imported
+        // eslint-disable-next-line require-atomic-updates
+        CodeMirrorInstance = instance
+      }
+      if (!codeMirrorModesReady) {
+        await Promise.all([
+          import('codemirror/mode/yaml/yaml'),
+          import('codemirror/mode/dockerfile/dockerfile')
+        ])
+        codeMirrorModesReady = true
+      }
+      return CodeMirrorInstance
     },
     sampleYaml() {
-      const projectRef = this.resolvedProject && this.resolvedProject.full_name
-        ? this.resolvedProject.full_name
-        : 'org/project'
-      return `kind: pipeline\nname: default\n\nsteps:\n  build:\n    image: golang:1.22\n    commands:\n      - go mod download\n      - go test ./...\n      - go build -o app ./cmd\n  docker:\n    image: woodpeckerci/plugin-docker:latest\n    when:\n      branch: main\n    settings:\n      repo: registry.example.com/${projectRef}\n      tags:\n        - latest\n  notify:\n    image: alpine:3.19\n    commands:\n      - echo "deployment placeholder"\n`
+      return ''
     },
     sampleDockerfile() {
-      return `# syntax=docker/dockerfile:1\nFROM alpine:3.19\n\n# 将构建输出复制到容器中\n# COPY ./dist/app /usr/local/bin/app\n\n# 如需执行编译，可在此添加 RUN 指令\n# RUN apk add --no-cache ca-certificates\n\nCMD ["echo", "请根据实际项目调整 Dockerfile"]\n`
+      return ''
     },
     async loadYaml() {
       this.loadingYaml = true
@@ -606,8 +614,41 @@ export default {
         : ''
       this.dockerfileDraft = existing || this.sampleDockerfile()
       this.dockerfileVisible = true
+      this.$nextTick(async() => {
+        try {
+          const textarea = this.$refs.dockerfileEditor
+          if (!textarea) {
+            return
+          }
+          const CodeMirror = await this.ensureCodeMirror()
+          if (this.dockerfileEditor) {
+            this.dockerfileEditor.toTextArea()
+            this.dockerfileEditor = null
+          }
+          this.dockerfileEditor = CodeMirror.fromTextArea(textarea, {
+            mode: 'dockerfile',
+            lineNumbers: true,
+            theme: 'material',
+            autofocus: true
+          })
+          this.dockerfileEditor.on('change', () => {
+            this.dockerfileDraft = this.dockerfileEditor.getValue()
+          })
+          this.dockerfileEditor.setValue(this.dockerfileDraft || '')
+          this.dockerfileEditor.setSize('100%', '100%')
+          requestAnimationFrame(() => {
+            if (this.dockerfileEditor) {
+              this.dockerfileEditor.refresh()
+              this.dockerfileEditor.focus()
+            }
+          })
+        } catch (err) {
+          console.warn('初始化 Dockerfile 编辑器失败', err)
+        }
+      })
     },
     closeDockerfileEditor() {
+      this.destroyDockerfileEditor()
       this.dockerfileVisible = false
       const saved = (this.settingsForm && typeof this.settingsForm.dockerfile === 'string')
         ? this.settingsForm.dockerfile
@@ -622,7 +663,7 @@ export default {
         if (!context.id) {
           throw new Error('项目数据尚未加载完成，无法保存 Dockerfile')
         }
-        const dockerfileBody = this.dockerfileDraft || ''
+        const dockerfileBody = (this.dockerfileEditor && this.dockerfileEditor.getValue()) || this.dockerfileDraft || ''
         const payload = {
           cleanup_enabled: this.settingsForm.cleanup_enabled,
           retention_days: this.settingsForm.retention_days,
@@ -636,6 +677,7 @@ export default {
         this.settingsForm = parsed
         this.cronRows = [...parsed.cron_schedules]
         this.dockerfileDraft = parsed.dockerfile || dockerfileBody
+        this.destroyDockerfileEditor()
         this.dockerfileVisible = false
       } catch (err) {
         const error = this.normalizeError(err, '保存 Dockerfile 失败')
@@ -644,6 +686,17 @@ export default {
       } finally {
         this.dockerfileSaving = false
         this.notifyExpose()
+      }
+    },
+    destroyDockerfileEditor() {
+      if (this.dockerfileEditor) {
+        try {
+          this.dockerfileDraft = this.dockerfileEditor.getValue()
+        } catch (err) {
+          // ignore read errors during teardown
+        }
+        this.dockerfileEditor.toTextArea()
+        this.dockerfileEditor = null
       }
     },
     async openRunModal() {
