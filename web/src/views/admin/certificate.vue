@@ -1,7 +1,10 @@
 <template>
   <div v-loading="loading" class="certificate-admin">
     <header class="certificate-admin__header">
-      <button class="button button--ghost" @click="backToAdmin">返回后台</button>
+      <div class="certificate-admin__nav">
+        <button class="button button--ghost" @click="backToDashboard">返回首页</button>
+        <button class="button button--ghost" @click="backToAdmin">返回后台</button>
+      </div>
       <h1>凭证管理</h1>
       <div class="certificate-admin__spacer" />
       <el-button type="primary" icon="el-icon-plus" :disabled="loading" @click="openCreate">新建凭证</el-button>
@@ -370,6 +373,9 @@ export default {
       const query = message ? { error: message } : undefined
       this.$router.replace({ path: '/login', query })
     },
+    backToDashboard() {
+      this.$router.push('/dashboard')
+    },
     backToAdmin() {
       this.$router.push('/admin')
     },
@@ -656,6 +662,11 @@ export default {
   display: flex;
   align-items: center;
   gap: 1rem;
+}
+
+.certificate-admin__nav {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .certificate-admin__header h1 {

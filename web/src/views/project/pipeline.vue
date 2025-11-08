@@ -193,6 +193,7 @@
                 支持 Linux crontab 语法，可按需配置多个表达式。
               </p>
             </div>
+
           </template>
         </section>
         <footer class="pipeline-modal__footer">
@@ -664,14 +665,8 @@ export default {
           throw new Error('项目数据尚未加载完成，无法保存 Dockerfile')
         }
         const dockerfileBody = (this.dockerfileEditor && this.dockerfileEditor.getValue()) || this.dockerfileDraft || ''
-        const payload = {
-          cleanup_enabled: this.settingsForm.cleanup_enabled,
-          retention_days: this.settingsForm.retention_days,
-          max_records: this.settingsForm.max_records,
-          dockerfile: dockerfileBody,
-          disallow_parallel: this.settingsForm.disallow_parallel,
-          cron_schedules: this.cleanCronRows()
-        }
+        const payload = this.buildSettingsPayload()
+        payload.dockerfile = dockerfileBody
         const data = await updatePipelineSettings(context.id, payload)
         const parsed = this.normalizeSettingsResponse(data)
         this.settingsForm = parsed

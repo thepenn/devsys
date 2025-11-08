@@ -809,7 +809,7 @@ export default {
   flex-direction: column;
   gap: 1rem;
   min-height: 280px;
-  max-height: 60vh;
+  max-height: 52vh;
   overflow: hidden;
 }
 
@@ -979,6 +979,7 @@ export default {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  max-height: calc(52vh - 120px);
 }
 
 .build-detail__log-viewer code {

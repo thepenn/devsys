@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -33,6 +31,7 @@ import (
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/model"
 	"github.com/thepenn/devsys/service/pipeline/queue"
+	dockerruntime "github.com/thepenn/devsys/service/pipeline/runtime/docker"
 	"github.com/thepenn/devsys/service/pipeline/spec"
 	systemsvc "github.com/thepenn/devsys/service/system"
 )
@@ -43,23 +42,22 @@ var envPlaceholderRegex = regexp.MustCompile(`\$\{(?:env\.)?([A-Za-z0-9_]+)\}`)
 
 // Service orchestrates pipeline lifecycle operations.
 type Service struct {
-	db             *store.DB
-	queue          *queue.PipelineQueue
-	cache          *cache.Cache
-	workerCount    int
-	cacheTTL       time.Duration
-	startOnce      sync.Once
-	started        atomic.Bool
-	defaultTimeout time.Duration
-	executions     sync.Map
-	systemSvc      *systemsvc.Service
-	scheduler      *cron.Cron
-	cronEntries    map[int64][]cron.ID
-	cronMu         sync.Mutex
-	dockerClient   *http.Client
-	dockerBaseURL  string
-	dockerOnce     sync.Once
-	dockerErr      error
+	db                *store.DB
+	queue             *queue.PipelineQueue
+	cache             *cache.Cache
+	workerCount       int
+	cacheTTL          time.Duration
+	startOnce         sync.Once
+	started           atomic.Bool
+	defaultTimeout    time.Duration
+	executions        sync.Map
+	systemSvc         *systemsvc.Service
+	scheduler         *cron.Cron
+	cronEntries       map[int64][]cron.ID
+	cronMu            sync.Mutex
+	dockerRuntime     *dockerruntime.Runtime
+	dockerRuntimeOnce sync.Once
+	dockerRuntimeErr  error
 }
 
 type Option func(*Service)
@@ -85,15 +83,17 @@ type pipelineTaskPayload struct {
 }
 
 type pipelineTaskStep struct {
-	PID      int                     `json:"pid"`
-	Name     string                  `json:"name"`
-	Image    string                  `json:"image"`
-	Commands []string                `json:"commands"`
-	Secrets  []string                `json:"secrets"`
-	Env      map[string]string       `json:"env,omitempty"`
-	Type     model.StepType          `json:"type,omitempty"`
-	Approval *pipelineApprovalConfig `json:"approval,omitempty"`
-	Plugin   *pipelinePluginConfig   `json:"plugin,omitempty"`
+	PID        int                     `json:"pid"`
+	Name       string                  `json:"name"`
+	Image      string                  `json:"image"`
+	Commands   []string                `json:"commands"`
+	Secrets    []string                `json:"secrets"`
+	Env        map[string]string       `json:"env,omitempty"`
+	Volumes    []string                `json:"volumes,omitempty"`
+	Privileged bool                    `json:"privileged,omitempty"`
+	Type       model.StepType          `json:"type,omitempty"`
+	Approval   *pipelineApprovalConfig `json:"approval,omitempty"`
+	Plugin     *pipelinePluginConfig   `json:"plugin,omitempty"`
 }
 
 type pipelinePluginConfig struct {
@@ -120,6 +120,20 @@ const (
 
 type executionHandle struct {
 	cancel context.CancelFunc
+}
+
+// EnvTemplate describes a default environment variable exposed to pipeline steps.
+type pipelineEnvContext struct {
+	repo     *model.Repo
+	pipeline *model.Pipeline
+	payload  pipelineTaskPayload
+}
+
+type envProvider func(*pipelineEnvContext) map[string]string
+
+var defaultEnvProviders = []envProvider{
+	providePipelineEnv,
+	provideRepoEnv,
 }
 
 // WithWorkerCount overrides the number of queue workers.
@@ -560,15 +574,17 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 			stepEnvVars = cloneStringMap(stepSpec.Env)
 		}
 		taskSteps = append(taskSteps, pipelineTaskStep{
-			PID:      pid,
-			Name:     stepName,
-			Image:    stepSpec.Image,
-			Commands: append([]string{}, stepSpec.Commands...),
-			Secrets:  stepSpec.Secrets,
-			Env:      stepEnvVars,
-			Type:     stepType,
-			Approval: approvalTaskCfg,
-			Plugin:   pluginCfg,
+			PID:        pid,
+			Name:       stepName,
+			Image:      stepSpec.Image,
+			Commands:   append([]string{}, stepSpec.Commands...),
+			Secrets:    stepSpec.Secrets,
+			Env:        stepEnvVars,
+			Volumes:    append([]string{}, stepSpec.Volumes...),
+			Privileged: stepSpec.Privileged,
+			Type:       stepType,
+			Approval:   approvalTaskCfg,
+			Plugin:     pluginCfg,
 		})
 	}
 
@@ -1069,26 +1085,14 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 
 	certEnv, cloneOverride, resolvedSecrets := s.buildCertificateEnv(ctx, repo, settings, allRequested)
 
-	envMap := envMapFromOS()
-	envMap["CI"] = "true"
-	envMap["CI_PIPELINE_ID"] = fmt.Sprintf("%d", pipelineRecord.ID)
-	envMap["CI_PIPELINE_NUMBER"] = fmt.Sprintf("%d", pipelineRecord.Number)
-	envMap["CI_PIPELINE_NAME"] = firstNonEmpty(payload.RunName, pipelineRecord.Title)
-	envMap["CI_PIPELINE_AUTHOR"] = pipelineRecord.Author
-	envMap["CI_PIPELINE_BRANCH"] = payload.Branch
-	envMap["CI_COMMIT_BRANCH"] = payload.Branch
-	envMap["CI_COMMIT_SHA"] = pipelineRecord.Commit
-	envMap["COMMIT_ID"] = pipelineRecord.Commit
-	envMap["COMMIT_ID_SHA"] = pipelineRecord.Commit
-	envMap["CI_REPO_ID"] = fmt.Sprintf("%d", repo.ID)
-	envMap["CI_REPO_NAME"] = repo.Name
-	envMap["CI_REPO_OWNER"] = repo.Owner
-	envMap["CI_REPO_FULL_NAME"] = repo.FullName
-	envMap["CI_DEFAULT_BRANCH"] = repo.Branch
-	envMap["REPO_URL"] = repo.Clone
-	envMap["REPO_CLONE_URL"] = repo.Clone
-	envMap["REPO_WEB_URL"] = repo.ForgeURL
-	envMap["REPO_OWNER"] = repo.Owner
+	envMap := s.buildBaseEnv(&pipelineEnvContext{
+		repo:     repo,
+		pipeline: pipelineRecord,
+		payload:  payload,
+	})
+	if envMap == nil {
+		envMap = make(map[string]string)
+	}
 
 	if pipelineRecord.AdditionalVariables != nil {
 		for key, value := range pipelineRecord.AdditionalVariables {
@@ -1104,6 +1108,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 	}
 	if cloneOverride != "" {
 		envMap["REPO_CLONE_URL_AUTH"] = cloneOverride
+	} else if strings.TrimSpace(envMap["REPO_CLONE_URL_AUTH"]) == "" {
+		envMap["REPO_CLONE_URL_AUTH"] = envMap["REPO_CLONE_URL"]
 	}
 
 	var workspace string
@@ -1317,27 +1323,17 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			}
 		}
 
+		usePluginRuntime := execStep.Plugin != nil && len(execStep.Commands) == 0
 		commands := append([]string{}, execStep.Commands...)
-		if len(commands) == 0 && execStep.Plugin != nil {
-			commands = buildPluginCommands(execStep, workspace, pluginEnv, stepEnv)
-		}
 		commands = applySecretPlaceholders(commands, stepSecrets)
-		commands = applyEnvPlaceholders(commands, placeholderEnv)
 		maskFn := buildSecretMasker(stepSecrets)
-		pluginContainer := ""
-		if execStep.Plugin != nil {
-			pluginContainer = pluginContainerName(execStep, stepEnv)
-		}
 
 		preHook := func(command string) error {
 			if workspace == "" {
 				return nil
 			}
 			lower := strings.ToLower(command)
-			if strings.Contains(lower, "docker build") || execStep.Plugin != nil {
-				if execStep.Plugin != nil && pluginContainer != "" {
-					s.cleanupDockerContainer(taskCtx, pluginContainer)
-				}
+			if strings.Contains(lower, "docker build") {
 				return ensureDockerfile(true, logFn)
 			}
 			return nil
@@ -1347,16 +1343,31 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			if workspace == "" {
 				return nil
 			}
-			if err := ensureDockerfile(false, logFn); err != nil {
-				return err
-			}
-			if execStep.Plugin != nil && pluginContainer != "" {
-				s.cleanupDockerContainer(taskCtx, pluginContainer)
-			}
-			return nil
+			return ensureDockerfile(false, logFn)
 		}
 
-		if err := s.executeCommands(taskCtx, workspace, commands, envMapToSlice(stepEnv), logFn, maskFn, preHook, postHook); err != nil {
+		if usePluginRuntime {
+			exitCode, err := s.runPluginStep(taskCtx, execStep, stepEnv, workspace, execStep.Plugin, ensureDockerfile, logFn)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					pipelineStatus = model.StatusKilled
+					failureMessage = "pipeline canceled"
+				} else {
+					pipelineStatus = model.StatusFailure
+					failureMessage = err.Error()
+				}
+				_ = s.setStepFinished(ctx, stepRecord.ID, statusFromPipeline(pipelineStatus), time.Now().Unix(), err, exitCode)
+				break
+			}
+			if err := s.setStepFinished(ctx, stepRecord.ID, model.StatusSuccess, time.Now().Unix(), nil, 0); err != nil {
+				return err
+			}
+			pipelineEnv = placeholderEnv
+			continue
+		}
+
+		exitCode, err := s.executeCommands(taskCtx, execStep, workspace, commands, stepEnv, logFn, maskFn, preHook, postHook)
+		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				pipelineStatus = model.StatusKilled
 				failureMessage = "pipeline canceled"
@@ -1364,17 +1375,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 				pipelineStatus = model.StatusFailure
 				failureMessage = err.Error()
 			}
-			exitCode := -1
-			if ee, ok := err.(*exec.ExitError); ok {
-				exitCode = ee.ExitCode()
-			}
 			_ = s.setStepFinished(ctx, stepRecord.ID, statusFromPipeline(pipelineStatus), time.Now().Unix(), err, exitCode)
-			if execStep.Plugin != nil && pluginContainer != "" {
-				s.cleanupDockerContainer(context.Background(), pluginContainer)
-			}
 			break
-		} else if execStep.Plugin != nil && pluginContainer != "" {
-			s.cleanupDockerContainer(context.Background(), pluginContainer)
 		}
 
 		postEnvValues, err := s.evaluateStepEnvCommands(taskCtx, workspace, postStepEnv, stepEnv, logFn)
@@ -1382,9 +1384,6 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			pipelineStatus = model.StatusFailure
 			failureMessage = err.Error()
 			_ = s.setStepFinished(ctx, stepRecord.ID, statusFromPipeline(pipelineStatus), time.Now().Unix(), err, -1)
-			if execStep.Plugin != nil && pluginContainer != "" {
-				s.cleanupDockerContainer(context.Background(), pluginContainer)
-			}
 			break
 		}
 		for key, value := range postEnvValues {
@@ -1539,39 +1538,73 @@ func (s *Service) prepareWorkspace(ctx context.Context, repo *model.Repo, pipeli
 	return workspace, rootDir, nil
 }
 
-func (s *Service) executeCommands(ctx context.Context, workspace string, commands []string, env []string, logFn func(string) error, maskFn func(string) string, preCommand func(string) error, postCommand func(string) error) error {
+func (s *Service) executeCommands(ctx context.Context, step pipelineTaskStep, workspace string, commands []string, stepEnv map[string]string, logFn func(string) error, maskFn func(string) string, preCommand func(string) error, postCommand func(string) error) (int, error) {
 	if maskFn == nil {
 		maskFn = func(s string) string { return s }
 	}
+	if strings.TrimSpace(workspace) == "" {
+		return -1, fmt.Errorf("workspace not prepared")
+	}
+	runner, err := s.dockerRunner()
+	if err != nil {
+		return -1, err
+	}
+	envSlice := envMapToSlice(stepEnv)
 	maskedLog := func(message string) error {
 		if logFn == nil {
 			return nil
 		}
 		return logFn(maskFn(message))
 	}
-	for _, cmd := range commands {
-		cmd = strings.TrimSpace(cmd)
+	cfgTemplate := dockerruntime.ContainerConfig{
+		Image:      step.Image,
+		Entrypoint: []string{},
+		Env:        envSlice,
+		WorkingDir: "/workspace",
+		Volumes:    map[string]struct{}{"/workspace": {}},
+		Binds:      []string{fmt.Sprintf("%s:/workspace", workspace)},
+		Privileged: step.Privileged,
+	}
+	for _, volume := range step.Volumes {
+		if strings.TrimSpace(volume) != "" {
+			cfgTemplate.Binds = append(cfgTemplate.Binds, volume)
+		}
+	}
+	var lastExitCode int
+	for idx, raw := range commands {
+		cmd := strings.TrimSpace(raw)
 		if cmd == "" {
 			continue
 		}
-		if err := maskedLog(fmt.Sprintf("$ %s", cmd)); err != nil {
-			return err
+		displayCmd := applyEnvPlaceholderToString(cmd, stepEnv)
+		if err := maskedLog(fmt.Sprintf("$ %s", displayCmd)); err != nil {
+			return -1, err
 		}
 		if preCommand != nil {
 			if err := preCommand(cmd); err != nil {
-				return err
+				return -1, err
 			}
 		}
-		if err := runShellCommand(ctx, workspace, cmd, env, maskedLog); err != nil {
-			return err
+		cfg := cfgTemplate
+		cfg.Name = commandContainerName(step, stepEnv, idx)
+		cfg.Cmd = []string{"/bin/sh", "-c", cmd}
+		exitCode, runErr := runner.Run(ctx, cfg, func(line string) error {
+			if logFn == nil {
+				return nil
+			}
+			return logFn(maskFn(line))
+		})
+		lastExitCode = exitCode
+		if runErr != nil {
+			return lastExitCode, runErr
 		}
 		if postCommand != nil {
 			if err := postCommand(cmd); err != nil {
-				return err
+				return lastExitCode, err
 			}
 		}
 	}
-	return nil
+	return lastExitCode, nil
 }
 
 func (s *Service) appendLogLine(ctx context.Context, stepID int64, line *int, content string) error {
@@ -1766,6 +1799,27 @@ func runCommandWithLogging(ctx context.Context, dir, name string, args []string,
 	return cmd.Wait()
 }
 
+func (s *Service) buildBaseEnv(ctx *pipelineEnvContext) map[string]string {
+	env := envMapFromOS()
+	for _, provider := range defaultEnvProviders {
+		env = mergeEnv(env, provider(ctx))
+	}
+	return env
+}
+
+func mergeEnv(dst map[string]string, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
 func envMapFromOS() map[string]string {
 	env := make(map[string]string)
 	for _, entry := range os.Environ() {
@@ -1807,6 +1861,58 @@ func cloneStringMap(input map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func providePipelineEnv(ctx *pipelineEnvContext) map[string]string {
+	if ctx == nil || ctx.pipeline == nil {
+		return nil
+	}
+	runName := firstNonEmpty(ctx.payload.RunName, ctx.pipeline.Title)
+	branch := firstNonEmpty(ctx.payload.Branch, ctx.pipeline.Branch)
+	env := map[string]string{
+		"CI":                 "true",
+		"CI_PIPELINE_ID":     fmt.Sprintf("%d", ctx.pipeline.ID),
+		"CI_PIPELINE_NUMBER": fmt.Sprintf("%d", ctx.pipeline.Number),
+		"CI_PIPELINE_NAME":   runName,
+		"CI_PIPELINE_AUTHOR": ctx.pipeline.Author,
+		"CI_PIPELINE_BRANCH": branch,
+		"CI_COMMIT_BRANCH":   branch,
+	}
+	commit := strings.TrimSpace(ctx.pipeline.Commit)
+	env["CI_COMMIT_SHA"] = commit
+	env["COMMIT_ID"] = commit
+	env["COMMIT_ID_SHA"] = commit
+	return env
+}
+
+func provideRepoEnv(ctx *pipelineEnvContext) map[string]string {
+	if ctx == nil || ctx.repo == nil {
+		return nil
+	}
+	repo := ctx.repo
+	cloneURL := strings.TrimSpace(repo.Clone)
+	if cloneURL == "" && ctx.payload.RepoClone != "" {
+		cloneURL = strings.TrimSpace(ctx.payload.RepoClone)
+	}
+	if cloneURL == "" {
+		cloneURL = strings.TrimSpace(ctx.payload.RepoURL)
+	}
+	if cloneURL == "" {
+		cloneURL = strings.TrimSpace(repo.ForgeURL)
+	}
+	env := map[string]string{
+		"CI_REPO_ID":          fmt.Sprintf("%d", repo.ID),
+		"CI_REPO_NAME":        repo.Name,
+		"CI_REPO_OWNER":       repo.Owner,
+		"CI_REPO_FULL_NAME":   repo.FullName,
+		"CI_DEFAULT_BRANCH":   repo.Branch,
+		"REPO_URL":            cloneURL,
+		"REPO_CLONE_URL":      cloneURL,
+		"REPO_CLONE_URL_AUTH": cloneURL,
+		"REPO_WEB_URL":        repo.ForgeURL,
+		"REPO_OWNER":          repo.Owner,
+	}
+	return env
 }
 
 func collectRequestedAliases(steps []pipelineTaskStep) map[string]string {
@@ -2239,69 +2345,6 @@ func (s *Service) evaluateStepEnvCommands(ctx context.Context, workspace string,
 	return results, nil
 }
 
-func buildPluginCommands(step pipelineTaskStep, workspace string, pluginEnv map[string]string, stepEnv map[string]string) []string {
-	if step.Plugin == nil {
-		return nil
-	}
-	args := []string{"docker", "run", "--rm"}
-	if step.Plugin.Privileged {
-		args = append(args, "--privileged")
-	}
-	containerName := pluginContainerName(step, stepEnv)
-	if containerName != "" {
-		args = append(args, "--name", containerName)
-	}
-	args = append(args, "-w", "/workspace")
-	if strings.TrimSpace(workspace) != "" {
-		args = append(args, "-v", shellEscape(fmt.Sprintf("%s:/workspace", workspace)))
-	}
-	for _, volume := range step.Plugin.Volumes {
-		args = append(args, "-v", shellEscape(volume))
-	}
-	for _, key := range pluginDockerEnvKeys(stepEnv, pluginEnv) {
-		args = append(args, "-e", key)
-	}
-	args = append(args, shellEscape(step.Image))
-	return []string{strings.Join(args, " ")}
-}
-
-func pluginDockerEnvKeys(stepEnv map[string]string, pluginEnv map[string]string) []string {
-	defaultKeys := []string{
-		"CI",
-		"CI_PIPELINE_ID",
-		"CI_PIPELINE_NUMBER",
-		"CI_PIPELINE_NAME",
-		"CI_PIPELINE_AUTHOR",
-		"CI_PIPELINE_BRANCH",
-		"CI_COMMIT_BRANCH",
-		"CI_COMMIT_SHA",
-		"CI_REPO_ID",
-		"CI_REPO_NAME",
-		"CI_REPO_OWNER",
-		"CI_REPO_FULL_NAME",
-		"WORKSPACE",
-		"CI_WORKSPACE",
-		"WORKSPACE_ROOT",
-		"CI_WORKSPACE_ROOT",
-		"COMMIT_ID",
-	}
-	set := make(map[string]struct{})
-	for _, key := range defaultKeys {
-		if _, ok := stepEnv[key]; ok {
-			set[key] = struct{}{}
-		}
-	}
-	for key := range pluginEnv {
-		set[key] = struct{}{}
-	}
-	keys := make([]string, 0, len(set))
-	for key := range set {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func pluginContainerName(step pipelineTaskStep, env map[string]string) string {
 	base := sanitizeContainerName(step.Name)
 	if base == "" {
@@ -2316,89 +2359,66 @@ func pluginContainerName(step pipelineTaskStep, env map[string]string) string {
 	return sanitizeContainerName(base)
 }
 
-func (s *Service) cleanupDockerContainer(ctx context.Context, name string) {
-	if strings.TrimSpace(name) == "" {
-		return
+func commandContainerName(step pipelineTaskStep, env map[string]string, index int) string {
+	base := sanitizeContainerName(step.Name)
+	if base == "" {
+		base = "step"
 	}
-	client, baseURL, err := s.dockerHTTPClient()
-	if err != nil || client == nil {
-		log.Warn().Err(err).Str("container", name).Msg("docker cleanup skipped; client init failed")
-		return
+	if pipelineID := strings.TrimSpace(env["CI_PIPELINE_ID"]); pipelineID != "" {
+		base = fmt.Sprintf("%s-%s", base, pipelineID)
 	}
-	cleanCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	target := fmt.Sprintf("%s/containers/%s?force=1&v=1", baseURL, url.PathEscape(name))
-	req, err := http.NewRequestWithContext(cleanCtx, http.MethodDelete, target, nil)
-	if err != nil {
-		log.Warn().Err(err).Str("container", name).Msg("unable to build docker cleanup request")
-		return
+	if step.PID > 0 {
+		base = fmt.Sprintf("%s-%d", base, step.PID)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Warn().Err(err).Str("container", name).Msg("docker cleanup request failed")
-		return
+	if index >= 0 {
+		base = fmt.Sprintf("%s-c%d", base, index+1)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		log.Warn().Str("container", name).Int("status", resp.StatusCode).Msgf("docker cleanup error: %s", strings.TrimSpace(string(body)))
-	}
+	return sanitizeContainerName(base)
 }
 
-func (s *Service) dockerHTTPClient() (*http.Client, string, error) {
-	s.dockerOnce.Do(func() {
-		client, baseURL, err := newDockerHTTPClient()
-		if err != nil {
-			s.dockerErr = err
-			return
+func (s *Service) runPluginStep(ctx context.Context, step pipelineTaskStep, stepEnv map[string]string, workspace string, pluginCfg *pipelinePluginConfig, ensureDockerfile func(bool, func(string) error) error, logFn func(string) error) (int, error) {
+	if pluginCfg == nil {
+		return -1, fmt.Errorf("plugin configuration missing")
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return -1, fmt.Errorf("workspace not prepared")
+	}
+	runner, err := s.dockerRunner()
+	if err != nil {
+		return -1, err
+	}
+	if ensureDockerfile != nil {
+		if err := ensureDockerfile(true, logFn); err != nil {
+			return -1, err
 		}
-		s.dockerClient = client
-		s.dockerBaseURL = baseURL
+		defer ensureDockerfile(false, logFn)
+	}
+	binds := []string{fmt.Sprintf("%s:/workspace", workspace)}
+	for _, volume := range pluginCfg.Volumes {
+		if strings.TrimSpace(volume) != "" {
+			binds = append(binds, volume)
+		}
+	}
+	cfg := dockerruntime.ContainerConfig{
+		Name:       pluginContainerName(step, stepEnv),
+		Image:      step.Image,
+		Env:        envMapToSlice(pluginContainerEnv(stepEnv)),
+		WorkingDir: "/workspace",
+		Volumes:    map[string]struct{}{"/workspace": {}},
+		Binds:      binds,
+		Privileged: pluginCfg.Privileged,
+	}
+	if len(step.Commands) > 0 {
+		cfg.Cmd = append([]string{}, step.Commands...)
+	}
+	return runner.Run(ctx, cfg, logFn)
+}
+
+func (s *Service) dockerRunner() (*dockerruntime.Runtime, error) {
+	s.dockerRuntimeOnce.Do(func() {
+		s.dockerRuntime, s.dockerRuntimeErr = dockerruntime.NewRuntime()
 	})
-	return s.dockerClient, s.dockerBaseURL, s.dockerErr
-}
-
-func newDockerHTTPClient() (*http.Client, string, error) {
-	host := strings.TrimSpace(os.Getenv("DOCKER_HOST"))
-	if host == "" {
-		host = "unix:///var/run/docker.sock"
-	}
-	const defaultTimeout = 10 * time.Second
-	if strings.HasPrefix(host, "unix://") {
-		socketPath := strings.TrimPrefix(host, "unix://")
-		dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath)
-		}
-		transport := &http.Transport{
-			DialContext: dial,
-		}
-		return &http.Client{
-			Transport: transport,
-			Timeout:   defaultTimeout,
-		}, "http://docker", nil
-	}
-
-	parsed, err := url.Parse(host)
-	if err != nil {
-		return nil, "", err
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	if scheme == "" {
-		scheme = "tcp"
-	}
-	switch scheme {
-	case "tcp":
-		return &http.Client{
-			Timeout: defaultTimeout,
-		}, "http://" + parsed.Host, nil
-	case "http", "https":
-		return &http.Client{
-			Timeout: defaultTimeout,
-		}, fmt.Sprintf("%s://%s", scheme, parsed.Host), nil
-	default:
-		return nil, "", fmt.Errorf("unsupported DOCKER_HOST scheme: %s", scheme)
-	}
+	return s.dockerRuntime, s.dockerRuntimeErr
 }
 
 func sanitizeContainerName(name string) string {
@@ -2427,15 +2447,21 @@ func sanitizeContainerName(name string) string {
 	return strings.Trim(builder.String(), "-")
 }
 
-func shellEscape(value string) string {
-	if value == "" {
-		return "''"
+func pluginContainerEnv(stepEnv map[string]string) map[string]string {
+	env := cloneStringMap(stepEnv)
+	fallbacks := []string{"/workspace"}
+	override := func(key string) {
+		if len(fallbacks) == 0 {
+			return
+		}
+		env[key] = fallbacks[0]
 	}
-	if !strings.ContainsAny(value, " \t\n\"'\\!$&()*;<>?|`") {
-		return value
-	}
-	escaped := strings.ReplaceAll(value, "'", "'\"'\"'")
-	return "'" + escaped + "'"
+	override("WORKSPACE")
+	override("CI_WORKSPACE")
+	override("WORKSPACE_ROOT")
+	override("CI_WORKSPACE_ROOT")
+	override("REPO_CLONE_PATH")
+	return env
 }
 
 func (s *Service) processApprovalStep(ctx context.Context, pipelineRecord *model.Pipeline, stepRecord *model.Step, execStep pipelineTaskStep, logFn func(string) error) (approvalResult, error) {
