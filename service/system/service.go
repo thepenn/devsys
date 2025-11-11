@@ -24,6 +24,9 @@ const (
 	publicKeyConfigKey  = "crypto.public_key"
 	privateKeyConfigKey = "crypto.private_key"
 	defaultRSAKeySize   = 2048
+
+	chunkedSecretPrefix    = "chunked:v1:"
+	chunkedSecretSeparator = "::"
 )
 
 // Service manages system level configuration such as RSA key pairs.
@@ -78,6 +81,32 @@ func (s *Service) DecryptString(ctx context.Context, cipherText string) (string,
 		return "", fmt.Errorf("rsa decrypt: %w", err)
 	}
 	return string(plain), nil
+}
+
+func (s *Service) decryptSecretValue(ctx context.Context, cipherText string) (string, error) {
+	if cipherText == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(cipherText, chunkedSecretPrefix) {
+		payload := strings.TrimPrefix(cipherText, chunkedSecretPrefix)
+		if payload == "" {
+			return "", nil
+		}
+		parts := strings.Split(payload, chunkedSecretSeparator)
+		var builder strings.Builder
+		for _, part := range parts {
+			if part == "" {
+				continue
+			}
+			plain, err := s.DecryptString(ctx, part)
+			if err != nil {
+				return "", err
+			}
+			builder.WriteString(plain)
+		}
+		return builder.String(), nil
+	}
+	return s.DecryptString(ctx, cipherText)
 }
 
 func (s *Service) ensureKeyPair(ctx context.Context) error {
@@ -447,7 +476,7 @@ func (s *Service) decryptSensitiveConfig(ctx context.Context, config map[string]
 		if model.IsSensitiveConfigKey(key) {
 			strVal, ok := val.(string)
 			if ok && strVal != "" {
-				plain, err := s.DecryptString(ctx, strVal)
+				plain, err := s.decryptSecretValue(ctx, strVal)
 				if err != nil {
 					return nil, fmt.Errorf("decrypt %s: %w", key, err)
 				}
@@ -490,7 +519,7 @@ func (s *Service) normalizeConfigForStorage(ctx context.Context, config map[stri
 				}
 				return nil, fmt.Errorf("%s value is invalid", key)
 			}
-			if _, err := s.DecryptString(ctx, trimmed); err != nil {
+			if _, err := s.decryptSecretValue(ctx, trimmed); err != nil {
 				return nil, fmt.Errorf("decrypt %s: %w", key, err)
 			}
 			sanitized[key] = trimmed

@@ -185,8 +185,12 @@ const SECRET_KEYS = new Set([
   'secret_key',
   'secret_token',
   'service_token',
-  'registry_token'
+  'registry_token',
+  'kubeconfig'
 ])
+
+const RSA_CHUNK_PREFIX = 'chunked:v1:'
+const RSA_CHUNK_SEPARATOR = '::'
 
 const TYPE_DEFINITIONS = {
   git: {
@@ -227,6 +231,12 @@ const TYPE_DEFINITIONS = {
       { key: 'email_attr', label: '邮箱属性', component: 'input', required: false, default: 'mail' },
       { key: 'group_attr', label: '组属性', component: 'input', required: false, default: 'memberOf' }
     ]
+  },
+  kubernetes: {
+    label: 'Kubernetes 集群',
+    fields: [
+      { key: 'kubeconfig', label: 'KubeConfig', component: 'textarea', rows: 10, required: true, secret: true }
+    ]
   }
 }
 
@@ -256,6 +266,35 @@ function createEmptyForm(type = 'git') {
     scope: '',
     config: buildDefaultConfig(type)
   }
+}
+
+function encryptSecretValueLong(encryptor, value) {
+  if (!value) return ''
+  const key = encryptor.getKey()
+  if (!key || !key.n || typeof key.n.bitLength !== 'function') {
+    throw new Error('RSA 公钥未就绪')
+  }
+  const chunkSize = Math.floor((key.n.bitLength() + 7) / 8) - 11
+  if (chunkSize <= 0) {
+    throw new Error('RSA key size is invalid')
+  }
+  if (value.length <= chunkSize) {
+    const encrypted = encryptor.encrypt(value)
+    if (!encrypted) {
+      throw new Error('加密失败')
+    }
+    return encrypted
+  }
+  const chunks = []
+  for (let i = 0; i < value.length; i += chunkSize) {
+    const segment = value.slice(i, i + chunkSize)
+    const encrypted = encryptor.encrypt(segment)
+    if (!encrypted) {
+      throw new Error('加密失败')
+    }
+    chunks.push(encrypted)
+  }
+  return `${RSA_CHUNK_PREFIX}${chunks.join(RSA_CHUNK_SEPARATOR)}`
 }
 
 export default {
@@ -550,7 +589,7 @@ export default {
             continue
           }
           const encryptor = await this.ensureEncryptor()
-          const encrypted = encryptor.encrypt(value)
+          const encrypted = encryptSecretValueLong(encryptor, value)
           if (!encrypted) {
             throw new Error(`${field.label} 加密失败`)
           }

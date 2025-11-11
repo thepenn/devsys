@@ -8,6 +8,7 @@ import (
 	"github.com/thepenn/devsys/internal/config"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/service/auth"
+	k8s "github.com/thepenn/devsys/service/k8s"
 	pipelineService "github.com/thepenn/devsys/service/pipeline"
 	"github.com/thepenn/devsys/service/pipeline/queue"
 	repoService "github.com/thepenn/devsys/service/repo"
@@ -22,6 +23,7 @@ type Services struct {
 	Pipeline *pipelineService.Service
 	Auth     *auth.Service
 	System   *systemService.Service
+	K8s      *k8s.Service
 }
 
 func NewServices(db *store.DB, q *queue.PipelineQueue, cache *cache.Cache, cfg *config.Config) (*Services, error) {
@@ -48,6 +50,7 @@ func NewServices(db *store.DB, q *queue.PipelineQueue, cache *cache.Cache, cfg *
 	if err != nil {
 		return nil, err
 	}
+	k8sSvc := k8s.New(systemSvc)
 
 	return &Services{
 		User:     userSvc,
@@ -55,5 +58,6 @@ func NewServices(db *store.DB, q *queue.PipelineQueue, cache *cache.Cache, cfg *
 		Pipeline: pipelineSvc,
 		Auth:     authSvc,
 		System:   systemSvc,
+		K8s:      k8sSvc,
 	}, nil
 }

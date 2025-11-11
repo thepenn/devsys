@@ -7,10 +7,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
-// Certificate represents a generic credential/configuration entry that can be
-// used for repositories, docker registries, middleware, etc. The structure is
-// intentionally flexible: the strongly typed fields capture the certificate
-// identity while the Config payload stores the provider specific JSON.
 type Certificate struct {
 	ID      int64                  `json:"id"        gorm:"column:id;primaryKey;autoIncrement"`
 	Name    string                 `json:"name"      gorm:"column:name;size:191;index"`
@@ -62,6 +58,14 @@ type LDAPCertificate struct {
 	UserAttr     string `json:"user_attr"`
 	EmailAttr    string `json:"email_attr"`
 	GroupAttr    string `json:"group_attr"`
+}
+
+// KubernetesCertificate stores kubeconfig content for a cluster.
+type KubernetesCertificate struct {
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	Server     string `json:"server"`
+	KubeConfig string `json:"kubeconfig"`
 }
 
 func (c *Certificate) decode(target interface{}) error {
@@ -127,6 +131,24 @@ func (c *Certificate) AsLDAPCertificate() (*LDAPCertificate, error) {
 	return &ldap, nil
 }
 
+// AsKubernetesCertificate decodes the certificate config into KubernetesCertificate.
+func (c *Certificate) AsKubernetesCertificate() (*KubernetesCertificate, error) {
+	if c.Type != CertificateTypeKubernetes {
+		return nil, fmt.Errorf("certificate type %s is not kubernetes", c.Type)
+	}
+	var kube KubernetesCertificate
+	if err := c.decode(&kube); err != nil {
+		return nil, err
+	}
+	if kube.Type == "" {
+		kube.Type = c.Type
+	}
+	if kube.Name == "" {
+		kube.Name = c.Name
+	}
+	return &kube, nil
+}
+
 // CertificateFilter captures optional filters for listing certificates.
 type CertificateFilter struct {
 	Type  string
@@ -145,6 +167,8 @@ type CertificatePatch struct {
 const (
 	// DefaultSecretMask specifies the value used when hiding secrets.
 	DefaultSecretMask = "******"
+	// CertificateTypeKubernetes denotes a kubernetes cluster credential.
+	CertificateTypeKubernetes = "kubernetes"
 )
 
 var sensitiveConfigKeys = map[string]struct{}{
@@ -164,6 +188,7 @@ var sensitiveConfigKeys = map[string]struct{}{
 	"secret_token":   {},
 	"service_token":  {},
 	"registry_token": {},
+	"kubeconfig":     {},
 }
 
 // IsSensitiveConfigKey returns true if the key is classified as sensitive.

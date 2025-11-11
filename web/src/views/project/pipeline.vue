@@ -690,8 +690,7 @@ export default {
           throw new Error('项目数据尚未加载完成，无法保存 Dockerfile')
         }
         const dockerfileBody = (this.dockerfileEditor && this.dockerfileEditor.getValue()) || this.dockerfileDraft || ''
-        const payload = this.buildSettingsPayload()
-        payload.dockerfile = dockerfileBody
+        const payload = this.buildSettingsPayload({ dockerfile: dockerfileBody })
         const data = await updatePipelineSettings(context.id, payload)
         const parsed = this.normalizeSettingsResponse(data)
         this.settingsForm = parsed
@@ -918,14 +917,7 @@ export default {
         this.settingsVisible = false
       }
     },
-    async saveSettings() {
-      const context = await this.ensureProject()
-      if (!context.id) {
-        this.error = '项目数据尚未加载完成，无法保存设置'
-        return
-      }
-      this.settingsSaving = true
-      this.error = ''
+    buildSettingsPayload(overrides = {}) {
       const payload = {
         cleanup_enabled: this.settingsForm.cleanup_enabled,
         retention_days: this.settingsForm.retention_days,
@@ -934,6 +926,17 @@ export default {
         disallow_parallel: this.settingsForm.disallow_parallel,
         cron_schedules: this.cleanCronRows()
       }
+      return { ...payload, ...overrides }
+    },
+    async saveSettings() {
+      const context = await this.ensureProject()
+      if (!context.id) {
+        this.error = '项目数据尚未加载完成，无法保存设置'
+        return
+      }
+      this.settingsSaving = true
+      this.error = ''
+      const payload = this.buildSettingsPayload()
       try {
         const data = await updatePipelineSettings(context.id, payload)
         const parsed = this.normalizeSettingsResponse(data)
@@ -1257,6 +1260,7 @@ export default {
 
 .pipeline-modal__body--fill {
   flex: 1;
+  min-height: 0;
   padding: 0 1.5rem 1.5rem;
   display: flex;
   flex-direction: column;
@@ -1284,6 +1288,11 @@ export default {
   color: #e2e8f0;
   font-size: 0.92rem;
   line-height: 1.6;
+}
+
+.pipeline-modal__body--fill :deep(.CodeMirror-scroll) {
+  max-height: 100%;
+  overflow: auto;
 }
 
 .pipeline-modal__hint {
