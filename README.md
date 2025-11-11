@@ -155,31 +155,33 @@ web/             // Vue2 前端工程
 kind: pipeline
 workspace: /tmp/devsys
 steps:
-  - name: default-env
-    image: registry.cn-hangzhou.aliyuncs.com/sixx/busybox
-    commands:
-      - env | sort
   - name: git-clone
     image: registry.cn-hangzhou.aliyuncs.com/sixx/git
-    certificate: [github-test-callback]
+    certificate: [github-test-clone-token]
     commands:
       - git clone --verbose ${REPO_CLONE_URL_AUTH} .
     env:
       COMMIT_ID: $(git rev-parse HEAD)
   - name: docker-build-push
     image: registry.cn-hangzhou.aliyuncs.com/sixx/plugin-docker-buildx:latest
-    certificate: [acr_aliyuncs]
+    certificate: [acr-docker-repo]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     settings:
-      repo: ${acr_aliyuncs.docker.repo}/sixx/devops
-      tags: ${env.COMMIT_ID}
+      repo: ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}
+      tags: ${COMMIT_ID_SHA}
       dry_run: false
-      password: ${acr_aliyuncs.docker.password}
-      registry: ${acr_aliyuncs.docker.repo}
-      username: ${acr_aliyuncs.docker.username}
+      registry: ${ACR_DOCKER_REPO_REPO}
+      password: ${ACR_DOCKER_REPO_PASSWORD}
+      username: ${ACR_DOCKER_REPO_USERNAME}
       platforms: linux/amd64
       dockerfile: Dockerfile
+      build_args:
+        - BUILDKIT_INLINE_CACHE=1
+      cache_from:
+        - type=registry,ref=${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache
+      cache_to:
+        - type=registry,ref=${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache,mode=max
     privileged: true
   - name: wait-for-approval
     image: alpine:latest
@@ -192,7 +194,49 @@ steps:
   - name: default-env
     image: registry.cn-hangzhou.aliyuncs.com/sixx/busybox
     commands:
-      - echo "deploy"
+      - env | sort
+
+---
+# ------------------------------------------------------------------------------
+# 可选：如果希望直接使用 docker 官方镜像来 build/push，可启用下面的步骤。
+# 它会挂载 npm/go 缓存目录，拉取上一版缓存镜像，并在构建完成后更新缓存。
+# ------------------------------------------------------------------------------
+  - name: docker-cli-build
+    image: docker:24
+    certificate: [acr-docker-repo]
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/npm-cache:/cache/npm
+      - /mnt/go-cache:/cache/go
+    environment:
+      DOCKER_BUILDKIT: '1'
+    commands:
+      - |
+        docker login ${ACR_DOCKER_REPO_REPO} \
+          -u ${ACR_DOCKER_REPO_USERNAME} \
+          -p ${ACR_DOCKER_REPO_PASSWORD}
+      - |
+        docker pull ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache || true
+      - |
+        docker build \
+          --platform linux/amd64 \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --build-arg NPM_CACHE=/cache/npm \
+          --build-arg GOMOD_CACHE=/cache/go \
+          --cache-from ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache \
+          --mount type=bind,source=/cache/npm,target=/root/.npm \
+          --mount type=bind,source=/cache/go,target=/go/pkg/mod \
+          -t ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:${COMMIT_ID_SHA} \
+          -f Dockerfile .
+      - |
+        docker push ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:${COMMIT_ID_SHA}
+      - |
+        docker tag ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:${COMMIT_ID_SHA} \
+          ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache
+      - |
+        docker push ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache
+
 ```
 
 **注意点**
