@@ -39,11 +39,32 @@
 
       <div v-if="flatSteps.length" class="build-detail__flow">
         <template v-for="(step, idx) in flatSteps">
-          <div :key="`step-card-${stepKey(step)}`" :class="['build-detail__flow-step', { 'build-detail__flow-step--active': currentStepId === stepKey(step) }]">
-            <span :class="['pipeline-status-bullet', stepBulletClass(step)]" />
-            <div class="build-detail__flow-info">
-              <span class="build-detail__flow-name">{{ step.name || `Step #${step.pid}` }}</span>
-              <span class="build-detail__flow-meta">{{ stepStatusLabel(step) }} · {{ formatDuration(step.started, step.finished) }}</span>
+          <div
+            :key="`step-card-${stepKey(step)}`"
+            :class="['build-detail__flow-step', { 'build-detail__flow-step--active': currentStepId === stepKey(step) }]"
+          >
+            <div class="build-detail__flow-main">
+              <span :class="['pipeline-status-bullet', stepBulletClass(step)]" />
+              <div class="build-detail__flow-info">
+                <span class="build-detail__flow-name">{{ step.name || `Step #${step.pid}` }}</span>
+                <span class="build-detail__flow-meta">{{ stepStatusLabel(step) }} · {{ formatDuration(step.started, step.finished) }}</span>
+              </div>
+            </div>
+            <div
+              v-if="stepApprovalActions(step).length"
+              class="build-detail__flow-actions"
+            >
+              <button
+                v-for="action in stepApprovalActions(step)"
+                :key="`${stepKey(step)}-${action}`"
+                type="button"
+                class="build-detail__flow-button"
+                :class="`build-detail__flow-button--${action}`"
+                :disabled="approvalSubmitting === action"
+                @click.stop="openApprovalDialog(step, action)"
+              >
+                {{ action === 'approve' ? '同意' : '拒绝' }}
+              </button>
             </div>
           </div>
           <span
@@ -113,13 +134,13 @@
                   v-if="currentStepApproval.can_approve"
                   class="approval-button approval-button--approve"
                   :disabled="approvalSubmitting === 'approve'"
-                  @click="submitApproval('approve')"
+                  @click="handleInlineApproval('approve')"
                 >{{ approvalSubmitting === 'approve' ? '处理中…' : '同意' }}</button>
                 <button
                   v-if="currentStepApproval.can_reject"
                   class="approval-button approval-button--reject"
                   :disabled="approvalSubmitting === 'reject'"
-                  @click="submitApproval('reject')"
+                  @click="handleInlineApproval('reject')"
                 >{{ approvalSubmitting === 'reject' ? '处理中…' : '拒绝' }}</button>
               </div>
               <div v-if="approvalDecisions.length" class="build-detail__approval-history">
@@ -170,6 +191,35 @@
       </div>
     </section>
 
+    <el-dialog
+      v-if="approvalDialogStep"
+      :visible.sync="approvalDialogVisible"
+      :title="approvalDialogTitle"
+      width="460px"
+      class="build-detail__approval-dialog"
+      @close="closeApprovalDialog"
+    >
+      <p class="build-detail__approval-dialog-name">
+        当前步骤：{{ approvalDialogStepLabel }}
+      </p>
+      <el-input
+        v-model="approvalDialogComment"
+        type="textarea"
+        :rows="4"
+        placeholder="填写审批备注（可选）"
+      />
+      <span slot="footer" class="dialog-footer">
+        <el-button @click="closeApprovalDialog">取消</el-button>
+        <el-button
+          :type="approvalDialogAction === 'approve' ? 'success' : 'danger'"
+          :loading="approvalSubmitting === approvalDialogAction"
+          @click="confirmApprovalDialog"
+        >
+          {{ approvalDialogAction === 'approve' ? '同意' : '拒绝' }}
+        </el-button>
+      </span>
+    </el-dialog>
+
     <section v-if="error" class="panel build-detail__error">
       <span>{{ error }}</span>
       <button class="button button--ghost" @click="loadDetail">重试</button>
@@ -180,6 +230,22 @@
 <script>
 import { listRepositories } from '@/api/project/repos'
 import { getPipelineRun, cancelPipelineRun, submitPipelineApproval } from '@/api/project/pipeline'
+import {
+  formatPipelineStatus,
+  getPipelineStatusClass,
+  getPipelineBulletClass,
+  getPipelineStatusMeta,
+  normalizePipelineStatus,
+  isPipelineStatusCancellable,
+  isPipelineStatusActive,
+  PIPELINE_STATUS,
+  formatApprovalState as formatApprovalStateLabel,
+  formatApprovalAction as formatApprovalActionLabel,
+  getApprovalActionClass
+} from '@/constants/status'
+import { isApprovalStep as isApprovalStepType } from '@/constants/step'
+import { formatTime as formatTimeUtil, formatDuration as formatDurationUtil } from '@/utils/time'
+import { normalizeError as normalizeErrorUtil } from '@/utils/error'
 
 export default {
   name: 'BuildDetail',
@@ -203,7 +269,11 @@ export default {
       currentStepId: null,
       pollingTimer: null,
       approvalComment: '',
-      approvalSubmitting: ''
+      approvalSubmitting: '',
+      approvalDialogVisible: false,
+      approvalDialogAction: '',
+      approvalDialogStep: null,
+      approvalDialogComment: ''
     }
   },
   computed: {
@@ -211,17 +281,18 @@ export default {
       return (this.detail && this.detail.workflows) || []
     },
     statusClass() {
-      if (!this.detail || !this.detail.pipeline) return 'unknown'
-      return (this.detail.pipeline.status || '').toLowerCase()
+      const pipeline = this.detail && this.detail.pipeline
+      return getPipelineStatusClass(pipeline && pipeline.status)
     },
     statusLabel() {
-      return this.formatStatus(this.detail && this.detail.pipeline && this.detail.pipeline.status)
+      const pipeline = this.detail && this.detail.pipeline
+      return formatPipelineStatus(pipeline && pipeline.status)
     },
     runNumber() {
       return (this.detail && this.detail.pipeline && this.detail.pipeline.number) || '-'
     },
     currentStepIsApproval() {
-      return this.currentStep && String(this.currentStep.type || '').toLowerCase() === 'approval'
+      return isApprovalStepType(this.currentStep)
     },
     currentStepApproval() {
       if (!this.currentStep || !this.currentStep.approval) return null
@@ -232,6 +303,16 @@ export default {
     },
     approvalPendingApprovers() {
       return (this.currentStepApproval && this.currentStepApproval.pending_approvers) || []
+    },
+    approvalDialogTitle() {
+      if (this.approvalDialogAction === 'approve') return '同意审批'
+      if (this.approvalDialogAction === 'reject') return '拒绝审批'
+      return '审批操作'
+    },
+    approvalDialogStepLabel() {
+      if (!this.approvalDialogStep) return ''
+      const identifier = this.approvalDialogStep.pid || this.approvalDialogStep.id
+      return this.approvalDialogStep.name || (identifier ? `Step #${identifier}` : '审批步骤')
     },
     currentStep() {
       if (!this.currentStepId) return null
@@ -256,9 +337,8 @@ export default {
       return list
     },
     canCancel() {
-      if (!this.detail || !this.detail.pipeline) return false
-      const status = (this.detail.pipeline.status || '').toLowerCase()
-      return status === 'running' || status === 'pending' || status === 'blocked'
+      const pipeline = this.detail && this.detail.pipeline
+      return isPipelineStatusCancellable(pipeline && pipeline.status)
     }
   },
   watch: {
@@ -382,8 +462,8 @@ export default {
       if (!this.detail || !this.detail.pipeline) {
         return
       }
-      const status = (this.detail.pipeline.status || '').toLowerCase()
-      if (status === 'running' || status === 'pending' || status === 'blocked') {
+      const status = this.detail.pipeline && this.detail.pipeline.status
+      if (isPipelineStatusActive(status)) {
         this.pollingTimer = setTimeout(() => this.loadDetail(), 3000)
       }
     },
@@ -435,178 +515,118 @@ export default {
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
     },
-    normalizeState(value) {
-      if (value === null || value === undefined) return ''
-      return String(value).trim().toLowerCase()
-    },
     stepHasRun(step) {
       if (!step) return false
       return Number(step.started) > 0
     },
+    isApprovalStep: isApprovalStepType,
+    stepApproval(step) {
+      if (!this.isApprovalStep(step)) return null
+      return step && step.approval ? step.approval : null
+    },
+    stepApprovalActions(step) {
+      const approval = this.stepApproval(step)
+      if (!approval) return []
+      const actions = []
+      if (approval.can_approve) actions.push('approve')
+      if (approval.can_reject) actions.push('reject')
+      return actions
+    },
     stepVisualState(step) {
       if (!this.stepHasRun(step)) {
-        return 'not-run'
+        return PIPELINE_STATUS.NOT_RUN
       }
-      const normalized = this.normalizeState(step && step.state)
-      if (normalized) {
+      const normalized = normalizePipelineStatus(step && step.state)
+      if (normalized && normalized !== PIPELINE_STATUS.UNKNOWN) {
         return normalized
       }
       if (step && step.finished) {
-        return 'success'
+        return PIPELINE_STATUS.SUCCESS
       }
-      return 'running'
+      return PIPELINE_STATUS.RUNNING
     },
     stepBulletClass(step) {
       const state = this.stepVisualState(step)
+      const bulletClass = getPipelineBulletClass(state)
       const classes = {
-        [`pipeline-status-bullet--${state}`]: true
+        [`pipeline-status-bullet--${bulletClass}`]: true
       }
-      if (state === 'not-run') {
+      const meta = getPipelineStatusMeta(state)
+      if (meta.bulletEmpty) {
         classes['pipeline-status-bullet--empty'] = true
       }
       return classes
     },
     stepStatusLabel(step) {
       const state = this.stepVisualState(step)
-      if (state === 'not-run') {
-        return '未执行'
-      }
-      return this.formatStatus(state)
+      return formatPipelineStatus(state)
     },
-    formatStatus(value) {
-      switch ((value || '').toLowerCase()) {
-        case 'success':
-          return '成功'
-        case 'failure':
-        case 'failed':
-          return '失败'
-        case 'error':
-          return '出错'
-        case 'killed':
-          return '终止'
-        case 'canceled':
-        case 'cancelled':
-          return '已取消'
-        case 'running':
-          return '运行中'
-        case 'pending':
-          return '等待'
-        case 'blocked':
-          return '等待审批'
-        case 'skipped':
-          return '跳过'
-        default:
-          return value || '未知'
+    openApprovalDialog(step, action) {
+      this.approvalDialogStep = step
+      this.approvalDialogAction = action
+      this.approvalDialogComment = ''
+      this.approvalDialogVisible = true
+    },
+    closeApprovalDialog() {
+      this.approvalDialogVisible = false
+      this.approvalDialogAction = ''
+      this.approvalDialogComment = ''
+      this.approvalDialogStep = null
+    },
+    async confirmApprovalDialog() {
+      if (!this.approvalDialogAction || !this.approvalDialogStep) return
+      const success = await this.submitApproval(this.approvalDialogAction, {
+        step: this.approvalDialogStep,
+        comment: this.approvalDialogComment
+      })
+      if (success) {
+        this.approvalDialogComment = ''
+        this.closeApprovalDialog()
       }
     },
-    formatApprovalState(state) {
-      switch ((state || '').toLowerCase()) {
-        case 'approved':
-          return '已通过'
-        case 'rejected':
-          return '已拒绝'
-        case 'expired':
-          return '已超时'
-        case 'pending':
-        default:
-          return '等待审批'
+    async handleInlineApproval(action) {
+      const success = await this.submitApproval(action)
+      if (success) {
+        this.approvalComment = ''
       }
     },
+    formatApprovalState: formatApprovalStateLabel,
     formatApprovalStrategy(strategy) {
       const normalized = (strategy || '').toLowerCase()
       if (normalized === 'all') return '会签（全部通过）'
       return '或签（任意一人通过）'
     },
-    formatApprovalAction(action) {
-      const normalized = (action || '').toLowerCase()
-      switch (normalized) {
-        case 'approve':
-        case 'approved':
-          return '通过'
-        case 'reject':
-        case 'rejected':
-          return '拒绝'
-        case 'expired':
-          return '超时'
-        default:
-          return normalized || '待处理'
-      }
-    },
-    approvalActionClass(action) {
-      const normalized = (action || '').toLowerCase()
-      if (normalized === 'approve' || normalized === 'approved') return 'approved'
-      if (normalized === 'reject' || normalized === 'rejected') return 'rejected'
-      return ''
-    },
-    async submitApproval(action) {
-      if (!this.currentStep || !this.currentStepApproval) return
+    formatApprovalAction: formatApprovalActionLabel,
+    approvalActionClass: getApprovalActionClass,
+    async submitApproval(action, options = {}) {
+      const targetStep = options.step || this.currentStep
+      const targetApproval = targetStep && targetStep.approval
+      if (!targetStep || !targetApproval) return false
       const context = await this.ensureProject()
       if (!context.id) {
         this.error = '项目数据尚未加载完成'
-        return
+        return false
       }
       this.approvalSubmitting = action
       this.error = ''
       try {
-        await submitPipelineApproval(context.id, this.runId, this.currentStep.id, {
+        await submitPipelineApproval(context.id, this.runId, targetStep.id, {
           action,
-          comment: this.approvalComment
+          comment: options.comment !== undefined ? options.comment : this.approvalComment
         })
-        this.approvalComment = ''
         await this.loadDetail()
+        return true
       } catch (err) {
         const error = this.normalizeError(err, '审批操作失败')
         this.error = error.message || '审批操作失败'
+        return false
       } finally {
         this.approvalSubmitting = ''
       }
     },
-    normalizeError(err, fallbackMessage) {
-      if (!err) {
-        const error = new Error(fallbackMessage || '请求失败')
-        error.status = 0
-        return error
-      }
-      if (err.response) {
-        const { status, data } = err.response
-        const message =
-          (data && (data.error || data.message)) ||
-          err.message ||
-          fallbackMessage ||
-          '请求失败'
-        const error = new Error(message)
-        error.status = status
-        return error
-      }
-      if (typeof err.status === 'number') {
-        if (!err.message && fallbackMessage) {
-          err.message = fallbackMessage
-        }
-        return err
-      }
-      const error = err instanceof Error ? err : new Error(fallbackMessage || '请求失败')
-      if (typeof error.status !== 'number') {
-        error.status = 0
-      }
-      return error
-    },
-    formatTime(unix) {
-      if (!unix) return ''
-      const ts = unix > 1e12 ? unix : unix * 1000
-      return new Date(ts).toLocaleString()
-    },
-    formatDuration(start, finish) {
-      if (!start) return '—'
-      const startMs = start > 1e12 ? start : start * 1000
-      const endMs = finish ? (finish > 1e12 ? finish : finish * 1000) : Date.now()
-      const diff = Math.max(0, endMs - startMs)
-      const minutes = Math.floor(diff / 60000)
-      const seconds = Math.floor((diff % 60000) / 1000)
-      if (minutes > 0) {
-        return `${minutes}m ${seconds}s`
-      }
-      return `${seconds}s`
-    }
+    normalizeError: normalizeErrorUtil,
+    formatTime: formatTimeUtil,
+    formatDuration: formatDurationUtil
   }
 }
 
@@ -669,8 +689,9 @@ export default {
 
 .build-detail__flow-step {
   display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
   padding: 0.6rem 0.8rem;
   background: #fff;
   border-radius: 999px;
@@ -689,6 +710,12 @@ export default {
   box-shadow: 0 16px 34px rgba(37, 99, 235, 0.2);
 }
 
+.build-detail__flow-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .build-detail__flow-info {
   display: flex;
   flex-direction: column;
@@ -704,6 +731,39 @@ export default {
 .build-detail__flow-meta {
   font-size: 0.75rem;
   color: #6b7280;
+}
+
+.build-detail__flow-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.build-detail__flow-button {
+  border: none;
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.build-detail__flow-button--approve {
+  background: #22c55e;
+}
+
+.build-detail__flow-button--reject {
+  background: #ef4444;
+}
+
+.build-detail__flow-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.build-detail__flow-button:not(:disabled):hover {
+  transform: translateY(-1px);
 }
 
 .build-detail__flow-arrow {
@@ -996,6 +1056,16 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.build-detail__approval-dialog-name {
+  margin-bottom: 0.8rem;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.build-detail__approval-dialog ::v-deep .el-textarea__inner {
+  min-height: 120px;
 }
 
 .build-detail__error {

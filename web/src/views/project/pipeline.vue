@@ -31,7 +31,7 @@
             >
               <td>
                 <span
-                  :class="['pipeline-status', `pipeline-status--${(run.status || '').toLowerCase()}`, { 'pipeline-history__cell-link': isRunNavigable(run) }]"
+                  :class="['pipeline-status', `pipeline-status--${statusClass(run.status)}`, { 'pipeline-history__cell-link': isRunNavigable(run) }]"
                   :role="isRunNavigable(run) ? 'button' : undefined"
                   :tabindex="isRunNavigable(run) ? 0 : -1"
                   @click="isRunNavigable(run) && viewDetails(run)"
@@ -134,6 +134,26 @@
             <span>Commit ID (可选)</span>
             <input v-model="runForm.commit" placeholder="传入具体 commit 时优先使用">
           </label>
+          <div class="modal-field">
+            <span>运行变量（可选）</span>
+            <p class="modal-hint">将以环境变量的形式传入流水线，仅填写需要覆盖的键。</p>
+            <div
+              v-for="(variable, idx) in runForm.variables"
+              :key="`pipeline-run-variable-${idx}`"
+              class="run-variable-row"
+            >
+              <input v-model="variable.key" placeholder="变量名，如 ENV">
+              <input v-model="variable.value" placeholder="变量值">
+              <button
+                type="button"
+                class="button button--ghost run-variable-remove"
+                @click="removeRunVariable(idx)"
+              >删除</button>
+            </div>
+            <button type="button" class="button button--ghost run-variable-add" @click="addRunVariable">
+              + 添加变量
+            </button>
+          </div>
           <p v-if="runFormError" class="modal-error">{{ runFormError }}</p>
         </section>
         <footer class="pipeline-modal__footer">
@@ -217,6 +237,10 @@ import {
   getPipelineSettings,
   updatePipelineSettings
 } from '@/api/project/pipeline'
+import { formatPipelineStatus, getPipelineStatusClass } from '@/constants/status'
+import { formatTime as formatTimeUtil, formatDuration as formatDurationUtil } from '@/utils/time'
+import { normalizeError as normalizeErrorUtil } from '@/utils/error'
+import { emptyVariableRow, normalizeVariableRows, serializeVariableRows } from '@/utils/pipeline-run'
 
 let CodeMirrorInstance = null
 let codeMirrorModesReady = false
@@ -263,7 +287,8 @@ export default {
       runModalVisible: false,
       runForm: {
         branch: '',
-        commit: ''
+        commit: '',
+        variables: [emptyVariableRow()]
       },
       runFormError: '',
       settingsVisible: false,
@@ -375,6 +400,7 @@ export default {
           import('codemirror/mode/yaml/yaml'),
           import('codemirror/mode/dockerfile/dockerfile')
         ])
+        // eslint-disable-next-line require-atomic-updates
         codeMirrorModesReady = true
       }
       return CodeMirrorInstance
@@ -697,9 +723,11 @@ export default {
     async openRunModal() {
       const context = await this.ensureProject()
       const repo = context.repo || this.resolvedProject
+      const branch = this.resolveDefaultBranch(repo)
       this.runForm = {
-        branch: (repo && repo.branch) || 'main',
-        commit: ''
+        branch,
+        commit: '',
+        variables: normalizeVariableRows()
       }
       this.runFormError = context.id ? '' : '项目数据尚未加载完成，请稍后重试'
       this.runModalVisible = true
@@ -707,6 +735,7 @@ export default {
     closeRunModal() {
       if (!this.running) {
         this.runModalVisible = false
+        this.resetRunForm()
       }
     },
     async submitRun() {
@@ -724,11 +753,15 @@ export default {
       this.error = ''
       let result = null
       try {
-        result = await triggerPipelineRun(context.id, {
+        const payload = {
           branch: this.runForm.branch.trim(),
-          commit: this.runForm.commit.trim(),
-          variables: {}
-        })
+          commit: this.runForm.commit.trim()
+        }
+        const variablesPayload = serializeVariableRows(this.runForm.variables)
+        if (variablesPayload) {
+          payload.variables = variablesPayload
+        }
+        result = await triggerPipelineRun(context.id, payload)
         this.runResult = result
         this.insertOrUpdateRun(result)
       } catch (err) {
@@ -741,6 +774,38 @@ export default {
         this.closeRunModal()
         this.loadRuns()
       }
+    },
+    resetRunForm() {
+      this.runForm = {
+        branch: '',
+        commit: '',
+        variables: normalizeVariableRows()
+      }
+    },
+    resolveDefaultBranch(repo) {
+      const recentRun = this.runs && this.runs.length ? this.runs[0] : null
+      const candidates = [
+        repo && repo.branch,
+        repo && repo.default_branch,
+        recentRun && recentRun.branch,
+        'main'
+      ]
+      for (const candidate of candidates) {
+        if (candidate && String(candidate).trim()) {
+          return String(candidate).trim()
+        }
+      }
+      return 'main'
+    },
+    addRunVariable() {
+      this.runForm.variables.push(emptyVariableRow())
+    },
+    removeRunVariable(index) {
+      if (this.runForm.variables.length <= 1) {
+        this.runForm.variables.splice(0, 1, emptyVariableRow())
+        return
+      }
+      this.runForm.variables.splice(index, 1)
     },
     insertOrUpdateRun(run) {
       if (!run || !run.id) return
@@ -841,35 +906,7 @@ export default {
         cron_schedules: schedules
       }
     },
-    normalizeError(err, fallbackMessage) {
-      if (!err) {
-        const error = new Error(fallbackMessage || '请求失败')
-        error.status = 0
-        return error
-      }
-      if (err.response) {
-        const { status, data } = err.response
-        const message =
-          (data && (data.error || data.message)) ||
-          err.message ||
-          fallbackMessage ||
-          '请求失败'
-        const error = new Error(message)
-        error.status = status
-        return error
-      }
-      if (typeof err.status === 'number') {
-        if (!err.message && fallbackMessage) {
-          err.message = fallbackMessage
-        }
-        return err
-      }
-      const error = err instanceof Error ? err : new Error(fallbackMessage || '请求失败')
-      if (typeof error.status !== 'number') {
-        error.status = 0
-      }
-      return error
-    },
+    normalizeError: normalizeErrorUtil,
     async openSettings() {
       this.settingsVisible = true
       try {
@@ -925,49 +962,12 @@ export default {
       this.loadRuns()
       this.loadSettings()
     },
-    formatStatus(value) {
-      switch ((value || '').toLowerCase()) {
-        case 'success':
-          return '成功'
-        case 'failure':
-        case 'failed':
-          return '失败'
-        case 'error':
-          return '出错'
-        case 'killed':
-          return '终止'
-        case 'canceled':
-        case 'cancelled':
-          return '已取消'
-        case 'running':
-          return '运行中'
-        case 'pending':
-          return '等待'
-        case 'blocked':
-          return '等待审批'
-        case 'skipped':
-          return '跳过'
-        default:
-          return value || '未知'
-      }
+    formatStatus: formatPipelineStatus,
+    statusClass(value) {
+      return getPipelineStatusClass(value)
     },
-    formatTime(unix) {
-      if (!unix) return ''
-      const ts = unix > 1e12 ? unix : unix * 1000
-      return new Date(ts).toLocaleString()
-    },
-    formatDuration(created, finished) {
-      if (!created) return '—'
-      const start = created > 1e12 ? created : created * 1000
-      const end = finished ? (finished > 1e12 ? finished : finished * 1000) : Date.now()
-      const diff = Math.max(0, end - start)
-      const minutes = Math.floor(diff / 60000)
-      const seconds = Math.floor((diff % 60000) / 1000)
-      if (minutes > 0) {
-        return `${minutes}m ${seconds}s`
-      }
-      return `${seconds}s`
-    },
+    formatTime: formatTimeUtil,
+    formatDuration: formatDurationUtil,
     isRunNavigable(run) {
       return Boolean(run && run.id)
     },
@@ -1316,11 +1316,36 @@ export default {
   gap: 0.4rem;
 }
 
+.modal-hint {
+  margin: -0.2rem 0 0.2rem;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
 .modal-field input {
   border: 1px solid #d1d5db;
   border-radius: 8px;
   padding: 0.6rem 0.8rem;
   font-size: 0.95rem;
+}
+
+.run-variable-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.run-variable-row input {
+  flex: 1;
+}
+
+.run-variable-remove {
+  padding: 0.4rem 0.8rem;
+}
+
+.run-variable-add {
+  align-self: flex-start;
+  padding: 0.35rem 0.8rem;
 }
 
 .modal-error {

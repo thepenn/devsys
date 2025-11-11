@@ -3,10 +3,13 @@ import { Message } from 'element-ui'
 import router from '@/router'
 import { getToken, setToken, clearToken } from '@/utils/auth'
 
+const DEFAULT_BASE_URL = process.env.VUE_APP_BASE_API || '/api/v1'
+const REQUEST_TIMEOUT = Number(process.env.VUE_APP_REQUEST_TIMEOUT) || 15000
+
 // create an axios instance
 const service = axios.create({
-  baseURL: process.env.VUE_APP_BASE_API || 'http://localhost:8080',
-  timeout: 5000 // request timeout
+  baseURL: DEFAULT_BASE_URL,
+  timeout: REQUEST_TIMEOUT
 })
 
 // request interceptor

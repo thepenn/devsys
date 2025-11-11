@@ -80,6 +80,7 @@
 import { clearToken, getToken } from '@/utils/auth'
 import { getCurrentUser } from '@/api/system/auth'
 import { listRepositories } from '@/api/project/repos'
+import { normalizeError } from '@/utils/error'
 
 export default {
   name: 'ProjectLayout',
@@ -175,6 +176,7 @@ export default {
     document.removeEventListener('click', this.handleGlobalClick)
   },
   methods: {
+    normalizeError,
     async bootstrap() {
       if (!this.token) {
         this.redirectToLogin('请先登录')
@@ -261,35 +263,6 @@ export default {
     },
     togglePipelineMenu() {
       this.pipelineMenuOpen = !this.pipelineMenuOpen
-    },
-    normalizeError(err, fallbackMessage) {
-      if (!err) {
-        const error = new Error(fallbackMessage || '请求失败')
-        error.status = 0
-        return error
-      }
-      if (err.response) {
-        const { status, data } = err.response
-        const message =
-          (data && (data.error || data.message)) ||
-          err.message ||
-          fallbackMessage ||
-          '请求失败'
-        const error = new Error(message)
-        error.status = status
-        return error
-      }
-      if (typeof err.status === 'number') {
-        if (!err.message && fallbackMessage) {
-          err.message = fallbackMessage
-        }
-        return err
-      }
-      const error = err instanceof Error ? err : new Error(fallbackMessage || '请求失败')
-      if (typeof error.status !== 'number') {
-        error.status = 0
-      }
-      return error
     },
     isUnauthorizedError(err) {
       if (!err) return false

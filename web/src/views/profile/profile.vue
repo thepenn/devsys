@@ -83,6 +83,7 @@ import { clearToken, getToken } from '@/utils/auth'
 import defaultAvatar from '@/assets/avatar/avatar.gif'
 import { getCurrentUser } from '@/api/system/auth'
 import { syncRepositories } from '@/api/project/repos'
+import { normalizeError } from '@/utils/error'
 
 const PROVIDER_LABELS = {
   gitlab: 'GitLab',
@@ -123,6 +124,7 @@ export default {
     this.bootstrap()
   },
   methods: {
+    normalizeError,
     async bootstrap() {
       if (!this.token) {
         this.redirectToLogin()
@@ -159,35 +161,6 @@ export default {
     goAdmin() {
       if (!this.safeUser.admin) return
       this.$router.push('/admin')
-    },
-    normalizeError(err, fallbackMessage) {
-      if (!err) {
-        const error = new Error(fallbackMessage || '请求失败')
-        error.status = 0
-        return error
-      }
-      if (err.response) {
-        const { status, data } = err.response
-        const message =
-          (data && (data.error || data.message)) ||
-          err.message ||
-          fallbackMessage ||
-          '请求失败'
-        const error = new Error(message)
-        error.status = status
-        return error
-      }
-      if (typeof err.status === 'number') {
-        if (!err.message && fallbackMessage) {
-          err.message = fallbackMessage
-        }
-        return err
-      }
-      const error = err instanceof Error ? err : new Error(fallbackMessage || '请求失败')
-      if (typeof error.status !== 'number') {
-        error.status = 0
-      }
-      return error
     },
     handleAuthError(err) {
       if (this.isUnauthorizedError(err)) {

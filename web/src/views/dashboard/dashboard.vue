@@ -201,6 +201,22 @@
                   <span>Commit ID (可选)</span>
                   <input v-model="runForm.commit" placeholder="传入具体 commit 时优先使用">
                 </label>
+                <div class="modal-field">
+                  <span>运行变量（可选）</span>
+                  <p class="modal-hint">这些键值将同步到流水线，可用于自定义参数。</p>
+                  <div
+                    v-for="(variable, idx) in runForm.variables"
+                    :key="`dashboard-run-var-${idx}`"
+                    class="run-variable-row"
+                  >
+                    <input v-model="variable.key" placeholder="变量名，如 TARGET_ENV">
+                    <input v-model="variable.value" placeholder="变量值">
+                    <button type="button" class="button button--ghost run-variable-remove" @click="removeRunVariable(idx)">删除</button>
+                  </div>
+                  <button type="button" class="button button--ghost run-variable-add" @click="addRunVariable">
+                    + 添加变量
+                  </button>
+                </div>
                 <p v-if="runFormError" class="modal-error">{{ runFormError }}</p>
               </section>
               <footer class="dashboard-modal__footer">
@@ -223,6 +239,8 @@ import defaultAvatar from '@/assets/avatar/avatar.gif'
 import { getCurrentUser } from '@/api/system/auth'
 import { listRepositories, syncRepositories, syncRepository } from '@/api/project/repos'
 import { triggerPipelineRun } from '@/api/project/pipeline'
+import { normalizeError } from '@/utils/error'
+import { emptyVariableRow, normalizeVariableRows, serializeVariableRows } from '@/utils/pipeline-run'
 
 const PROVIDER_LABELS = {
   gitlab: 'GitLab',
@@ -251,7 +269,8 @@ export default {
       runTargetRepo: null,
       runForm: {
         branch: 'main',
-        commit: ''
+        commit: '',
+        variables: [emptyVariableRow()]
       },
       runFormError: '',
       running: false
@@ -291,6 +310,7 @@ export default {
     document.removeEventListener('click', this.handleDocumentClick)
   },
   methods: {
+    normalizeError,
     async bootstrap() {
       if (!this.token) {
         this.redirectToLogin()
@@ -378,7 +398,8 @@ export default {
         'main'
       this.runForm = {
         branch: defaultBranch,
-        commit: ''
+        commit: '',
+        variables: normalizeVariableRows()
       }
       this.runFormError = ''
       this.running = false
@@ -391,10 +412,7 @@ export default {
       this.runModalVisible = false
       this.runTargetRepo = null
       this.runFormError = ''
-      this.runForm = {
-        branch: 'main',
-        commit: ''
-      }
+      this.resetRunForm()
     },
     async submitRun() {
       const branch = (this.runForm.branch || '').trim()
@@ -410,11 +428,15 @@ export default {
       this.running = true
       let result = null
       try {
-        result = await triggerPipelineRun(this.runTargetRepo.id, {
+        const payload = {
           branch,
-          commit: (this.runForm.commit || '').trim(),
-          variables: {}
-        })
+          commit: (this.runForm.commit || '').trim()
+        }
+        const variablesPayload = serializeVariableRows(this.runForm.variables)
+        if (variablesPayload) {
+          payload.variables = variablesPayload
+        }
+        result = await triggerPipelineRun(this.runTargetRepo.id, payload)
       } catch (err) {
         const error = this.normalizeError(err, '触发流水线失败')
         if (this.isUnauthorizedError(error)) {
@@ -438,6 +460,23 @@ export default {
           })
         }
       }
+    },
+    resetRunForm() {
+      this.runForm = {
+        branch: 'main',
+        commit: '',
+        variables: normalizeVariableRows()
+      }
+    },
+    addRunVariable() {
+      this.runForm.variables.push(emptyVariableRow())
+    },
+    removeRunVariable(index) {
+      if (this.runForm.variables.length <= 1) {
+        this.runForm.variables.splice(0, 1, emptyVariableRow())
+        return
+      }
+      this.runForm.variables.splice(index, 1)
     },
     setViewSynced(value) {
       if (this.viewSynced === value) {
@@ -482,35 +521,6 @@ export default {
         default:
           return value || '未知'
       }
-    },
-    normalizeError(err, fallbackMessage) {
-      if (!err) {
-        const error = new Error(fallbackMessage || '请求失败')
-        error.status = 0
-        return error
-      }
-      if (err.response) {
-        const { status, data } = err.response
-        const message =
-          (data && (data.error || data.message)) ||
-          err.message ||
-          fallbackMessage ||
-          '请求失败'
-        const error = new Error(message)
-        error.status = status
-        return error
-      }
-      if (typeof err.status === 'number') {
-        if (!err.message && fallbackMessage) {
-          err.message = fallbackMessage
-        }
-        return err
-      }
-      const error = err instanceof Error ? err : new Error(fallbackMessage || '请求失败')
-      if (error && typeof error.status !== 'number') {
-        error.status = 0
-      }
-      return error
     },
     handleAuthError(err) {
       if (this.isUnauthorizedError(err)) {
@@ -1023,6 +1033,28 @@ export default {
 .modal-field input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.modal-hint {
+  margin: -0.15rem 0 0.2rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.run-variable-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.run-variable-row input {
+  flex: 1;
+}
+
+.run-variable-remove,
+.run-variable-add {
+  align-self: flex-start;
+  padding: 0.35rem 0.75rem;
 }
 
 .modal-error {
