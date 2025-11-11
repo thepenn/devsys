@@ -25,8 +25,7 @@
               :key="run.id"
               :class="[
                 'pipeline-history__row',
-                { 'pipeline-history__row--active': run.id === selectedRunId },
-                { 'pipeline-history__row--clickable': isRunNavigable(run) }
+                { 'pipeline-history__row--active': run.id === selectedRunId }
               ]"
             >
               <td>
@@ -240,7 +239,7 @@ import {
 import { formatPipelineStatus, getPipelineStatusClass } from '@/constants/status'
 import { formatTime as formatTimeUtil, formatDuration as formatDurationUtil } from '@/utils/time'
 import { normalizeError as normalizeErrorUtil } from '@/utils/error'
-import { emptyVariableRow, normalizeVariableRows, serializeVariableRows } from '@/utils/pipeline-run'
+import { emptyVariableRow, serializeVariableRows } from '@/utils/pipeline-run'
 
 let CodeMirrorInstance = null
 let codeMirrorModesReady = false
@@ -727,7 +726,7 @@ export default {
       this.runForm = {
         branch,
         commit: '',
-        variables: normalizeVariableRows()
+        variables: []
       }
       this.runFormError = context.id ? '' : '项目数据尚未加载完成，请稍后重试'
       this.runModalVisible = true
@@ -779,7 +778,7 @@ export default {
       this.runForm = {
         branch: '',
         commit: '',
-        variables: normalizeVariableRows()
+        variables: []
       }
     },
     resolveDefaultBranch(repo) {
@@ -798,14 +797,12 @@ export default {
       return 'main'
     },
     addRunVariable() {
-      this.runForm.variables.push(emptyVariableRow())
+      this.runForm.variables = [...this.runForm.variables, emptyVariableRow()]
     },
     removeRunVariable(index) {
-      if (this.runForm.variables.length <= 1) {
-        this.runForm.variables.splice(0, 1, emptyVariableRow())
-        return
-      }
-      this.runForm.variables.splice(index, 1)
+      const next = [...this.runForm.variables]
+      next.splice(index, 1)
+      this.runForm.variables = next
     },
     insertOrUpdateRun(run) {
       if (!run || !run.id) return
@@ -1119,14 +1116,6 @@ export default {
   cursor: default;
 }
 
-.pipeline-history__row--clickable {
-  cursor: pointer;
-}
-
-.pipeline-history__row--clickable:hover {
-  background: #f9fafb;
-}
-
 .pipeline-history__row--active {
   background: #eef2ff;
 }
@@ -1222,7 +1211,7 @@ export default {
 }
 
 .pipeline-modal__content {
-  width: 480px;
+  width: 560px;
   max-width: 100%;
   background: #ffffff;
   border-radius: 16px;

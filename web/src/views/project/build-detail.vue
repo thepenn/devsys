@@ -525,8 +525,14 @@ export default {
       return step && step.approval ? step.approval : null
     },
     stepApprovalActions(step) {
+      if (!this.stepHasRun(step)) {
+        return []
+      }
       const approval = this.stepApproval(step)
       if (!approval) return []
+      if ((approval.state || '').toLowerCase() !== 'pending') {
+        return []
+      }
       const actions = []
       if (approval.can_approve) actions.push('approve')
       if (approval.can_reject) actions.push('reject')
