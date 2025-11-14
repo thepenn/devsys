@@ -2,14 +2,9 @@
 
 DevSys 是一个自部署的 CI/CD 平台，后端由 Go 编写、前端基于 Vue 2 + Element UI。系统集成了多代码托管平台登录与仓库同步、流水线 YAML 配置、审批/定时触发、Docker 构建以及工作空间保理等功能，适合在私有环境里统一管理构建与发布流程。
 
-## 功能亮点
+**功能亮点**
+- 系统使用GIT仓库进行认证，系统权限与仓库权限保持一致，在仓库为管理员，那么当前系统也是管理员，可以进行管理员功能，包含凭证管理、k8s集群管理、数据库读写管理、操作审计查看等操作。
 
-- **多代码源接入**：支持 GitHub、GitLab、Gitea、Gitee，登录与仓库同步均由同一 Provider 控制，可按组织白名单同步。
-- **流水线即代码**：仓库绑定 `.yaml` 配置描述步骤、镜像、命令、证书及变量，提供审批 Step、Dockerfile 回退文本、环境透传等能力。
-- **多种触发方式**：手动触发、Webhook、多个 Cron 表达式同时调度，并发限制和序列化编号已处理。
-- **审批与操作审计**：等待审批的 Step 在 UI 中展示同意/拒绝按钮（颜色区分），审批记录写入日志流和流程图。
-- **构建产物治理**：可配置保留天数和最大记录数，清理任务会连带删除过期的工作空间目录。
-- **可视化控制台**：内置 Dashboard、项目列表、构建详情（含日志、画布、变量展示、审批栏），支持浅色/深色日志背景。
 
 ## 目录结构概览
 
@@ -28,7 +23,6 @@ web/             // Vue2 前端工程
 - Node.js **16+**（推荐 18 LTS，用于 `web/` 工程）
 - MySQL **5.7+/8.0+**
 - `wire` 代码生成器：`go install github.com/google/wire/cmd/wire@latest`
-- （可选）`npm` 或 `pnpm`/`yarn` 按需
 
 ## 快速开始（前后端一体）
 
@@ -58,6 +52,10 @@ web/             // Vue2 前端工程
    - 浏览器访问 `http://localhost:8080/#/dashboard`。
    - 按提示完成 OAuth 登录（Provider 由 `SERVER_AUTH_PROVIDER` 决定）。
    - 触发“同步仓库”即可将白名单组织下的仓库导入系统。
+
+5. **查看接口文档**
+   - 浏览器访问：http://localhost:8080/api.json，即可查看接口json文件。
+   - 将链接放在 https://petstore.swagger.io/ 中然后Explore即可查看项目接口文档。
 
 ## 环境变量速查
 
@@ -238,20 +236,3 @@ steps:
         docker push ${ACR_DOCKER_REPO_REPO}/sixx/${CI_REPO_NAME}:buildcache
 
 ```
-
-**注意点**
-
-- `approval` Step 会暂停流水线，直到 UI 中的审批人点击“同意/拒绝”。
-- 任何命令的日志在后端统一脱敏：包含 `password`/`token` 的变量值会被替换成 `***`.
-- 如果仓库目录存在 `Dockerfile`，构建阶段会优先使用仓库文件；否则使用 `RepoPipelineConfig.Dockerfile` 中保存的模板。
-- Cron 定时触发使用 `github.com/gdgvda/cron`，同一仓库多条 Cron 会各自入队，并在管线层序列化为唯一编号。
-- 步骤语义兼容 Drone / Woodpecker 插件生态：在 `steps` 的 `image` + `settings` 中直接引用官方/社区插件（如 `plugins/docker`、`woodpeckerci/plugin-docker-buildx`）即可无缝使用已有 YAML 片段。
-
-
-## 常见问题
-
-- **无法同步仓库**：确认 `SERVER_<PROVIDER>_ORGS` 是否包含目标组织，GitHub 需勾选 `read:org`。若留空仍无仓库，检查访问 token 是否过期。
-- **审批按钮不显示**：仅当当前登录用户在 Step `approvers` 列表中时才会渲染按钮；管理员可从构建详情的“更多操作”中取消流水线。
-- **前端静态页仍可访问**：关闭后端仅影响 API，可在 Web 服务器上配置健康检查或反向代理错误页来阻止缓存页面。
-
-如需更多细节，请浏览对应源文件（服务逻辑位于 [service](service/) 目录，API Router 位于 [routers](routers/)）。欢迎根据业务需求继续扩展。

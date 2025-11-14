@@ -45,15 +45,6 @@ type ApprovalSpec struct {
 
 // Parse parses a pipeline YAML definition and returns a PipelineSpec.
 // The parser focuses on the subset of the Woodpecker/Drone schema used by our UI:
-//
-//	kind: pipeline
-//	name: default
-//	steps:
-//	  build:
-//	    image: golang:1.22
-//	    commands:
-//	      - go mod download
-//	      ...
 func Parse(yamlContent string) (*PipelineSpec, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(yamlContent), &root); err != nil {
@@ -186,17 +177,16 @@ func parseSequenceSteps(node *yaml.Node) ([]StepSpec, error) {
 			return nil, fmt.Errorf("steps 序列元素必须为 mapping 结构")
 		}
 		var decoded struct {
-			Name       string            `yaml:"name"`
-			Image      string            `yaml:"image"`
-			Commands   []string          `yaml:"commands"`
-			Secrets    []string          `yaml:"secrets"`
-			Env        map[string]string `yaml:"env"`
-			Settings   map[string]any    `yaml:"settings"`
-			Volumes    []string          `yaml:"volumes"`
-			Privileged bool              `yaml:"privileged"`
-			// allow singular/plural spellings
-			Certificate  yaml.Node `yaml:"certificate"`
-			Certificates yaml.Node `yaml:"certificates"`
+			Name         string            `yaml:"name"`
+			Image        string            `yaml:"image"`
+			Commands     []string          `yaml:"commands"`
+			Secrets      []string          `yaml:"secrets"`
+			Env          map[string]string `yaml:"env"`
+			Settings     map[string]any    `yaml:"settings"`
+			Volumes      []string          `yaml:"volumes"`
+			Privileged   bool              `yaml:"privileged"`
+			Certificate  yaml.Node         `yaml:"certificate"`
+			Certificates yaml.Node         `yaml:"certificates"`
 		}
 		if err := item.Decode(&decoded); err != nil {
 			return nil, fmt.Errorf("解析 steps 条目失败: %w", err)

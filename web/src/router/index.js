@@ -43,6 +43,30 @@ const router = new Router({
       meta: { requiresAuth: true }
     },
     {
+      path: '/admin/kubernetes',
+      component: () => import('@/views/admin/k8s/index.vue'),
+      meta: { requiresAuth: true },
+      children: [
+        {
+          path: '',
+          redirect: 'clusters'
+        },
+        {
+          path: 'clusters',
+          name: 'AdminK8sClusters',
+          component: () => import('@/views/admin/k8s/pages/ClusterList.vue'),
+          meta: { requiresAuth: true }
+        },
+        {
+          path: 'clusters/:clusterId',
+          name: 'AdminK8sClusterWorkspace',
+          component: () => import('@/views/admin/k8s/pages/ClusterWorkspace.vue'),
+          meta: { requiresAuth: true },
+          props: true
+        }
+      ]
+    },
+    {
       path: '/projects/:owner/:name',
       component: () => import('@/views/project/project.vue'),
       meta: { requiresAuth: true },

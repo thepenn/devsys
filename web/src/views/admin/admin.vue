@@ -87,6 +87,15 @@ export default {
           label: '进入管理',
           pending: false,
           route: '/admin/certificates'
+        },
+        {
+          key: 'kubernetes',
+          title: 'Kubernetes 管理',
+          description: '查看并管理集群内 Deployment、ConfigMap、Service 及事件日志。',
+          icon: '☸️',
+          label: '进入管理',
+          pending: false,
+          route: '/admin/kubernetes'
         }
         // 更多功能入口后续开放
       ]

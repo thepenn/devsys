@@ -11,6 +11,9 @@ script/test/*.sh
 .env
 .env.*
 
+# Test pipeline
+.test-pipeline.yaml
+
 # Logs
 *.log
 
@@ -20,7 +23,3 @@ onekey-alert
 # OS
 .DS_Store
 Thumbs.db
-
-
-# Test pipeline
-.test-pipeline.yaml

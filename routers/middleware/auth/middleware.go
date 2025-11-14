@@ -43,20 +43,31 @@ func (m *Middleware) RequireAuth(req *restful.Request, resp *restful.Response, c
 }
 
 func (m *Middleware) parseAndAttach(r *http.Request) (context.Context, *auth.SessionClaims) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	token := extractTokenFromRequest(r)
+	if token == "" {
 		return r.Context(), nil
 	}
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return r.Context(), nil
-	}
-	claims, err := m.service.ParseToken(parts[1])
+	claims, err := m.service.ParseToken(token)
 	if err != nil {
 		return r.Context(), nil
 	}
 	ctx := context.WithValue(r.Context(), userContextKey, claims)
 	return ctx, claims
+}
+
+func extractTokenFromRequest(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return parts[1]
+		}
+	}
+	queryToken := r.URL.Query().Get("token")
+	if queryToken != "" {
+		return queryToken
+	}
+	return ""
 }
 
 func FromContext(ctx context.Context) (*auth.SessionClaims, bool) {
