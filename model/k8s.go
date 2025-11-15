@@ -5,7 +5,6 @@ type KubernetesClusterSummary struct {
 	ID      int64  `json:"id"`
 	Name    string `json:"name"`
 	Server  string `json:"server"`
-	Scope   string `json:"scope"`
 	Updated int64  `json:"updated"`
 }
 

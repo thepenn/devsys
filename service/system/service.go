@@ -269,9 +269,6 @@ func (s *Service) ListCertificates(ctx context.Context, opts model.ListOptions, 
 		if t := strings.TrimSpace(filter.Type); t != "" {
 			query = query.Where("type = ?", t)
 		}
-		if scope := strings.TrimSpace(filter.Scope); scope != "" {
-			query = query.Where("scope = ?", scope)
-		}
 		if name := strings.TrimSpace(filter.Name); name != "" {
 			like := "%" + name + "%"
 			query = query.Where("name LIKE ?", like)
@@ -371,7 +368,6 @@ func (s *Service) CreateCertificate(ctx context.Context, cert *model.Certificate
 
 	cert.Name = strings.TrimSpace(cert.Name)
 	cert.Type = strings.TrimSpace(cert.Type)
-	cert.Scope = strings.TrimSpace(cert.Scope)
 
 	if cert.Name == "" {
 		return nil, fmt.Errorf("certificate name is required")
@@ -424,9 +420,6 @@ func (s *Service) UpdateCertificate(ctx context.Context, id int64, patch model.C
 				return fmt.Errorf("certificate type is required")
 			}
 			cert.Type = typ
-		}
-		if patch.Scope != nil {
-			cert.Scope = strings.TrimSpace(*patch.Scope)
 		}
 		if patch.Config != nil {
 			sanitized, err := s.normalizeConfigForStorage(ctx, patch.Config, true)
@@ -489,6 +482,62 @@ func (s *Service) decryptSensitiveConfig(ctx context.Context, config map[string]
 	return result, nil
 }
 
+func (s *Service) normalizeSecretValue(ctx context.Context, value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if _, err := s.decryptSecretValue(ctx, value); err == nil {
+		return value, nil
+	}
+	return s.encryptSecretValue(ctx, value)
+}
+
+func (s *Service) encryptSecretValue(ctx context.Context, plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	if err := s.ensureKeyPair(ctx); err != nil {
+		return "", err
+	}
+	s.mu.RLock()
+	pub := &s.privateKey.PublicKey
+	s.mu.RUnlock()
+	maxChunk := pub.N.BitLen()/8 - 11
+	if maxChunk <= 0 {
+		return "", fmt.Errorf("invalid rsa key")
+	}
+	data := []byte(plain)
+	if len(data) <= maxChunk {
+		return encryptChunk(pub, data)
+	}
+	parts := make([]string, 0, (len(data)+maxChunk-1)/maxChunk)
+	for len(data) > 0 {
+		chunk := data
+		if len(chunk) > maxChunk {
+			chunk = data[:maxChunk]
+		}
+		cipher, err := encryptChunk(pub, chunk)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, cipher)
+		if len(data) > maxChunk {
+			data = data[maxChunk:]
+		} else {
+			break
+		}
+	}
+	return chunkedSecretPrefix + strings.Join(parts, chunkedSecretSeparator), nil
+}
+
+func encryptChunk(pub *rsa.PublicKey, chunk []byte) (string, error) {
+	cipher, err := rsa.EncryptPKCS1v15(rand.Reader, pub, chunk)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(cipher), nil
+}
+
 func (s *Service) normalizeConfigForStorage(ctx context.Context, config map[string]interface{}, skipEmptySecrets bool) (map[string]interface{}, error) {
 	if len(config) == 0 {
 		return map[string]interface{}{}, nil
@@ -519,10 +568,11 @@ func (s *Service) normalizeConfigForStorage(ctx context.Context, config map[stri
 				}
 				return nil, fmt.Errorf("%s value is invalid", key)
 			}
-			if _, err := s.decryptSecretValue(ctx, trimmed); err != nil {
-				return nil, fmt.Errorf("decrypt %s: %w", key, err)
+			encrypted, err := s.normalizeSecretValue(ctx, trimmed)
+			if err != nil {
+				return nil, fmt.Errorf("encrypt %s: %w", key, err)
 			}
-			sanitized[key] = trimmed
+			sanitized[key] = encrypted
 			continue
 		}
 		switch v := val.(type) {

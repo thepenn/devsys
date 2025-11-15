@@ -1,0 +1,93 @@
+.pipeline-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.pipeline-alert {
+  margin-bottom: 16px;
+}
+
+.pipeline-history .ant-card-body {
+  padding-top: 0;
+}
+
+.pipeline-row--active {
+  background: #eef2ff !important;
+}
+
+.pipeline-selected .pipeline-label {
+  display: block;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.pipeline-placeholder {
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pipeline-status {
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #fff;
+}
+
+.pipeline-status--success {
+  background: #22c55e;
+}
+
+.pipeline-status--failure,
+.pipeline-status--error {
+  background: #ef4444;
+}
+
+.pipeline-status--running {
+  background: #0ea5e9;
+}
+
+.pipeline-status--pending,
+.pipeline-status--blocked {
+  background: #f59e0b;
+}
+
+.pipeline-status--killed,
+.pipeline-status--canceled {
+  background: #475569;
+}
+
+.pipeline-status--unknown {
+  background: #94a3b8;
+}
+
+.pipeline-status--not-run {
+  background: #cbd5f5;
+  color: #1d4ed8;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-hint {
+  color: #94a3b8;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.run-variable-row {
+  width: 100%;
+}
+
+.settings-empty {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.cron-row {
+  width: 100%;
+}

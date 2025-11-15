@@ -16,6 +16,7 @@ import (
 	"github.com/thepenn/devsys/routers"
 	"github.com/thepenn/devsys/routers/middleware/admin"
 	"github.com/thepenn/devsys/routers/middleware/auth"
+	"github.com/thepenn/devsys/routers/middleware/cors"
 	"github.com/thepenn/devsys/routers/middleware/metrics"
 	"github.com/thepenn/devsys/service"
 	"github.com/thepenn/devsys/service/migrate"
@@ -26,6 +27,7 @@ import (
 // Injectors from wire.go:
 
 func WireApp(cfg *config.Config) (*App, error) {
+	middleware := InjectedCorsMiddleware()
 	db, err := InjectedDatabase(cfg)
 	if err != nil {
 		return nil, err
@@ -36,12 +38,12 @@ func WireApp(cfg *config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	middleware := InjectedAuthMiddleware(services)
-	routers := InjectedRouters(cfg, services, middleware)
+	authMiddleware := InjectedAuthMiddleware(services)
+	routers := InjectedRouters(cfg, services, authMiddleware)
 	adminMiddleware := InjectedAdminMiddleware(services)
 	metricsMiddleware := InjectedMetricsMiddleware()
-	handler := InjectedHandler(cfg, routers, middleware, adminMiddleware, metricsMiddleware)
-	httpServer := InjectedHttpServer(cfg, handler)
+	handler := InjectedHandler(cfg, routers, authMiddleware, adminMiddleware, metricsMiddleware)
+	httpServer := InjectedHttpServer(cfg, middleware, handler)
 	app := NewApp(httpServer, services, db, cache)
 	return app, nil
 }
@@ -74,6 +76,7 @@ var appSet = wire.NewSet(
 	InjectedQueue,
 	InjectedServices,
 	InjectedMetricsMiddleware,
+	InjectedCorsMiddleware,
 	InjectedAdminMiddleware,
 	InjectedAuthMiddleware,
 	NewApp,
@@ -87,8 +90,8 @@ func InjectedHandler(cfg *config.Config, routers2 *routers.Routers, authMiddlewa
 	return handler.NewHandler(handler.WithConfig(cfg.Server.Host, cfg.Server.RootPath), handler.WithRegisterControllers(routers2), handler.WithRegisterMiddlewares(authMiddleware), handler.WithRegisterMiddlewares(adminMiddleware), handler.WithRegisterMiddlewares(metric))
 }
 
-func InjectedHttpServer(cfg *config.Config, h *handler.Handler) *server.HttpServer {
-	return server.NewHttpServer(cfg.Server.Host, h.Handler())
+func InjectedHttpServer(cfg *config.Config, corsMiddleware *cors.Middleware, h *handler.Handler) *server.HttpServer {
+	return server.NewHttpServer(cfg.Server.Host, corsMiddleware.WrapHTTP(h.Handler()))
 }
 
 func InjectedDatabase(cfg *config.Config) (*store.DB, error) {
@@ -116,6 +119,10 @@ func InjectedServices(db *store.DB, q *queue.PipelineQueue, cache2 *cache.Cache,
 
 func InjectedMetricsMiddleware() *metrics.Middleware {
 	return metrics.New()
+}
+
+func InjectedCorsMiddleware() *cors.Middleware {
+	return cors.New()
 }
 
 func InjectedAdminMiddleware(services *service.Services) *admin.Middleware {

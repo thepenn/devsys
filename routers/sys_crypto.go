@@ -161,9 +161,8 @@ func (r *systemRouter) listCertificates(req *restful.Request, resp *restful.Resp
 	opts := model.ListOptions{Page: page, PerPage: perPage}
 
 	filter := model.CertificateFilter{
-		Type:  req.QueryParameter("type"),
-		Scope: req.QueryParameter("scope"),
-		Name:  req.QueryParameter("name"),
+		Type: req.QueryParameter("type"),
+		Name: req.QueryParameter("name"),
 	}
 
 	certs, total, err := r.services.System.ListCertificates(req.Request.Context(), opts, filter)
@@ -202,7 +201,6 @@ func (r *systemRouter) createCertificate(req *restful.Request, resp *restful.Res
 	cert := &model.Certificate{
 		Name:   strings.TrimSpace(body.Name),
 		Type:   strings.TrimSpace(body.Type),
-		Scope:  strings.TrimSpace(body.Scope),
 		Config: body.Config,
 	}
 
@@ -231,7 +229,15 @@ func (r *systemRouter) getCertificate(req *restful.Request, resp *restful.Respon
 		return
 	}
 
-	cert, err := r.services.System.GetCertificate(req.Request.Context(), id)
+	var (
+		cert   *model.Certificate
+		reveal = strings.EqualFold(req.QueryParameter("reveal"), "true")
+	)
+	if reveal {
+		cert, err = r.services.System.GetCertificateWithSecrets(req.Request.Context(), id)
+	} else {
+		cert, err = r.services.System.GetCertificate(req.Request.Context(), id)
+	}
 	if err != nil {
 		writeError(resp, http.StatusInternalServerError, err)
 		return
@@ -272,10 +278,6 @@ func (r *systemRouter) updateCertificate(req *restful.Request, resp *restful.Res
 	if body.Type != nil {
 		typ := strings.TrimSpace(*body.Type)
 		patch.Type = &typ
-	}
-	if body.Scope != nil {
-		scope := strings.TrimSpace(*body.Scope)
-		patch.Scope = &scope
 	}
 
 	updated, err := r.services.System.UpdateCertificate(req.Request.Context(), id, patch)
@@ -375,14 +377,12 @@ func (r *systemRouter) certificateID(req *restful.Request) (int64, error) {
 type certificateCreateRequest struct {
 	Name   string                 `json:"name"`
 	Type   string                 `json:"type"`
-	Scope  string                 `json:"scope"`
 	Config map[string]interface{} `json:"config"`
 }
 
 type certificateUpdateRequest struct {
 	Name   *string                `json:"name,omitempty"`
 	Type   *string                `json:"type,omitempty"`
-	Scope  *string                `json:"scope,omitempty"`
 	Config map[string]interface{} `json:"config,omitempty"`
 }
 
@@ -390,7 +390,6 @@ type certificateResponse struct {
 	ID           int64                  `json:"id"`
 	Name         string                 `json:"name"`
 	Type         string                 `json:"type"`
-	Scope        string                 `json:"scope"`
 	Config       map[string]interface{} `json:"config"`
 	MaskedFields []string               `json:"masked_fields"`
 	Created      int64                  `json:"created"`
@@ -410,7 +409,6 @@ func newCertificateResponse(cert *model.Certificate) certificateResponse {
 		ID:           cert.ID,
 		Name:         cert.Name,
 		Type:         cert.Type,
-		Scope:        cert.Scope,
 		Config:       maskedConfig,
 		MaskedFields: maskedKeys,
 		Created:      cert.Created,

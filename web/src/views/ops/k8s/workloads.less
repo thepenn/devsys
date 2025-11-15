@@ -1,0 +1,107 @@
+.workloads-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+
+  .ant-card-head {
+    padding: 0 20px;
+    flex-shrink: 0;
+  }
+
+  .ant-card-head-title {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .ant-card-body {
+    padding: 16px 20px;
+    overflow: hidden;
+    flex: 1;
+    min-height: 0;
+  }
+
+  :global(.ant-table-wrapper) {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  :global(.ant-spin-nested-loading) {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  :global(.ant-spin-container) {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  :global(.ant-table) {
+    flex: 1;
+    overflow: hidden;
+  }
+
+  :global(.ant-table-container) {
+    height: 100%;
+    overflow: auto;
+  }
+}
+
+.workloads-toolbar {
+  .ant-select,
+  .ant-input-search {
+    font-size: 13px;
+  }
+}
+
+.workloads-table {
+  .ant-table-thead > tr > th,
+  .ant-table-tbody > tr > td {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .ant-table-tbody > tr > td {
+    vertical-align: middle;
+  }
+}
+
+.workload-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  &__title {
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+}
+
+.workload-tag {
+  background: #f1f5f9;
+  color: #475569;
+  border-radius: 10px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.workload-image {
+  white-space: nowrap;
+}
+
+.workload-actions {
+  .ant-btn-link {
+    padding: 0 6px;
+    height: auto;
+    font-size: 12px;
+  }
+}
+
+.workload-kind {
+  color: #475569;
+  font-size: 12px;
+}

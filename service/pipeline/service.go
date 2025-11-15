@@ -3259,15 +3259,6 @@ func (s *Service) buildCertificateEnv(ctx context.Context, repo *model.Repo, set
 			if cert == nil {
 				continue
 			}
-			scope := strings.ToLower(strings.TrimSpace(cert.Scope))
-			if scope != "" && scope != "global" {
-				log.Debug().
-					Int64("certificate_id", cert.ID).
-					Str("alias", original).
-					Str("scope", cert.Scope).
-					Msg("skipping non-global certificate for pipeline fallback")
-				continue
-			}
 			sanitized := sanitizeAlias(original)
 			if sanitized == "" {
 				sanitized = fmt.Sprintf("CERT_%d", cert.ID)

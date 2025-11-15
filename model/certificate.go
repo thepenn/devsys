@@ -12,7 +12,6 @@ type Certificate struct {
 	Name    string                 `json:"name"      gorm:"column:name;size:191;index"`
 	Type    string                 `json:"type"      gorm:"column:type;size:64;index"`
 	Config  map[string]interface{} `json:"config"    gorm:"column:config;serializer:json"`
-	Scope   string                 `json:"scope"     gorm:"column:scope;size:64"` // optional: e.g. global/project specific
 	Created int64                  `json:"created"   gorm:"column:created"`
 	Updated int64                  `json:"updated"   gorm:"column:updated"`
 }
@@ -151,16 +150,14 @@ func (c *Certificate) AsKubernetesCertificate() (*KubernetesCertificate, error) 
 
 // CertificateFilter captures optional filters for listing certificates.
 type CertificateFilter struct {
-	Type  string
-	Scope string
-	Name  string
+	Type string
+	Name string
 }
 
 // CertificatePatch contains mutable fields for certificate update.
 type CertificatePatch struct {
 	Name   *string                `json:"name,omitempty"`
 	Type   *string                `json:"type,omitempty"`
-	Scope  *string                `json:"scope,omitempty"`
 	Config map[string]interface{} `json:"config,omitempty"`
 }
 

@@ -25,5 +25,4 @@ run: server
 
 .PHONY: web
 web:
-	cd web && npm run build:prod && cd ..
-
+	cd web && npm run build && cd ..

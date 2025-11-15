@@ -23,3 +23,7 @@ onekey-alert
 # OS
 .DS_Store
 Thumbs.db
+
+# web
+web/dist/
+web/node_modules/

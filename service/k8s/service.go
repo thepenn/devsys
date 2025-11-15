@@ -82,7 +82,6 @@ func (s *Service) ListClusters(ctx context.Context) ([]model.KubernetesClusterSu
 			ID:      cert.ID,
 			Name:    cert.Name,
 			Server:  server,
-			Scope:   cert.Scope,
 			Updated: cert.Updated,
 		})
 	}

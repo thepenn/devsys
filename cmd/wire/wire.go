@@ -16,6 +16,7 @@ import (
 	"github.com/thepenn/devsys/routers"
 	adminmw "github.com/thepenn/devsys/routers/middleware/admin"
 	authmw "github.com/thepenn/devsys/routers/middleware/auth"
+	corsmw "github.com/thepenn/devsys/routers/middleware/cors"
 	"github.com/thepenn/devsys/routers/middleware/metrics"
 	"github.com/thepenn/devsys/service"
 	"github.com/thepenn/devsys/service/migrate"
@@ -48,6 +49,7 @@ var appSet = wire.NewSet(
 	InjectedQueue,
 	InjectedServices,
 	InjectedMetricsMiddleware,
+	InjectedCorsMiddleware,
 	InjectedAdminMiddleware,
 	InjectedAuthMiddleware,
 	NewApp,
@@ -67,8 +69,8 @@ func InjectedHandler(cfg *config.Config, routers *routers.Routers, authMiddlewar
 	)
 }
 
-func InjectedHttpServer(cfg *config.Config, h *handler.Handler) *server.HttpServer {
-	return server.NewHttpServer(cfg.Server.Host, h.Handler())
+func InjectedHttpServer(cfg *config.Config, corsMiddleware *corsmw.Middleware, h *handler.Handler) *server.HttpServer {
+	return server.NewHttpServer(cfg.Server.Host, corsMiddleware.WrapHTTP(h.Handler()))
 }
 
 func InjectedDatabase(cfg *config.Config) (*store.DB, error) {
@@ -96,6 +98,10 @@ func InjectedServices(db *store.DB, q *queue.PipelineQueue, cache *cache.Cache, 
 
 func InjectedMetricsMiddleware() *metrics.Middleware {
 	return metrics.New()
+}
+
+func InjectedCorsMiddleware() *corsmw.Middleware {
+	return corsmw.New()
 }
 
 func InjectedAdminMiddleware(services *service.Services) *adminmw.Middleware {
