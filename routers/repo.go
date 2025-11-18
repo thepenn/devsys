@@ -55,6 +55,7 @@ type pipelineRunResponse struct {
 	Message  string            `json:"message"`
 	Author   string            `json:"author"`
 	Commit   string            `json:"commit"`
+	PrevCommit string          `json:"prev_commit"`
 }
 
 type pipelineRunListResponse struct {
@@ -350,6 +351,18 @@ func (r *repoRouter) listPipelineRuns(req *restful.Request, resp *restful.Respon
 		perPage = 20
 	}
 
+	lastBranchCommit := make(map[string]string)
+	prevCommitMap := make(map[int64]string, len(items))
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
+		if item == nil {
+			continue
+		}
+		branchKey := strings.TrimSpace(item.Branch)
+		prevCommitMap[item.ID] = lastBranchCommit[branchKey]
+		lastBranchCommit[branchKey] = item.Commit
+	}
+
 	response := pipelineRunListResponse{
 		Items:   make([]pipelineRunResponse, 0, len(items)),
 		Page:    page,
@@ -367,6 +380,7 @@ func (r *repoRouter) listPipelineRuns(req *restful.Request, resp *restful.Respon
 			Message:  item.Message,
 			Author:   item.Author,
 			Commit:   item.Commit,
+			PrevCommit: prevCommitMap[item.ID],
 		})
 	}
 

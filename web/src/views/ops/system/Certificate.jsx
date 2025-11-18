@@ -23,6 +23,7 @@ import {
   getCertificate
 } from '../../../api/system/certificates';
 import './certificate.less';
+import TablePagination from '../../../components/TablePagination';
 
 const TYPE_OPTIONS = [
   { value: 'git', label: 'Git' },
@@ -225,17 +226,6 @@ const Certificate = () => {
     }
   ];
 
-  const paginationConfig = {
-    current: page,
-    pageSize: perPage,
-    total,
-    showSizeChanger: true,
-    onChange: (p, size) => {
-      setPage(p);
-      setPerPage(size);
-    }
-  };
-
   return (
     <div className="ops-certificate">
       <Card
@@ -271,7 +261,17 @@ const Certificate = () => {
           loading={loading}
           columns={columns}
           dataSource={certificates}
-          pagination={paginationConfig}
+          pagination={false}
+        />
+        <TablePagination
+          page={page}
+          pageSize={perPage}
+          total={total}
+          onChange={(nextPage, nextSize) => {
+            setPage(nextPage);
+            setPerPage(nextSize);
+          }}
+          className="table-pagination--flush"
         />
       </Card>
 

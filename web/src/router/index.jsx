@@ -22,6 +22,7 @@ import K8sMonitor from '../views/ops/k8s/Monitor';
 import ProjectList from '../views/ops/project/ProjectList';
 import ProjectBuild from '../views/ops/project/ProjectBuild';
 import ProjectMonitor from '../views/ops/project/ProjectMonitor';
+import ProjectBuildDetail from '../views/ops/project/ProjectBuildDetail';
 import MessageNotification from '../views/ops/notice/MessageNotification';
 import AlertManagement from '../views/ops/notice/AlertManagement';
 import DatabaseMySQL from '../views/ops/database/DatabaseMySQL';
@@ -34,13 +35,20 @@ import SystemAudit from '../views/ops/system/Audit';
 import SystemProfile from '../views/ops/system/Profile';
 import { useAuth } from '../context/AuthContext';
 
-const AppRoutes = () => {
-  const { isAdmin } = useAuth();
-  const landingPath = isAdmin ? '/ops' : '/dev';
+const LandingRedirect = () => {
+  const { isAdmin, loading } = useAuth();
+  
+  if (loading) {
+    return null;
+  }
+  
+  const landingPath = isAdmin ? '/ops/k8s/clusters' : '/dev/dashboard';
+  return <Navigate to={landingPath} replace />;
+};
 
+const AppRoutes = () => {
   const routes = useMemo(
     () => [
-      { path: '/', element: <Navigate to={landingPath} replace /> },
       { path: '/login', element: <LoginPage /> },
       {
         path: '/dev',
@@ -87,6 +95,7 @@ const AppRoutes = () => {
           { path: 'profile', element: <SystemProfile /> },
           { path: 'projects/list', element: <ProjectList /> },
           { path: 'projects/pipeline', element: <ProjectBuild /> },
+          { path: 'projects/build/:repoId/:runId', element: <ProjectBuildDetail /> },
           { path: 'projects/monitor', element: <ProjectMonitor /> },
           { path: 'messages/notification', element: <MessageNotification /> },
           { path: 'messages/alert', element: <AlertManagement /> },
@@ -99,9 +108,10 @@ const AppRoutes = () => {
           { path: 'system/audit', element: <SystemAudit /> }
         ]
       },
+      { path: '/', element: <LandingRedirect /> },
       { path: '*', element: <Navigate to="/login" replace /> }
     ],
-    [landingPath]
+    []
   );
 
   const element = useRoutes(routes);

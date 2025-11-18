@@ -27,6 +27,7 @@ type StepSpec struct {
 	Privileged bool
 	Kind       StepKind
 	Approval   *ApprovalSpec
+	Conditions *StepConditions
 }
 
 type StepKind string
@@ -41,6 +42,10 @@ type ApprovalSpec struct {
 	Approvers []string
 	Timeout   int64
 	Strategy  string
+}
+
+type StepConditions struct {
+	Branches []string
 }
 
 // Parse parses a pipeline YAML definition and returns a PipelineSpec.
@@ -117,6 +122,7 @@ func parseMappingSteps(node *yaml.Node) ([]StepSpec, error) {
 			Settings   map[string]any    `yaml:"settings"`
 			Volumes    []string          `yaml:"volumes"`
 			Privileged bool              `yaml:"privileged"`
+			When       map[string]any    `yaml:"when"`
 			// allow singular/plural spellings
 			Certificate  yaml.Node `yaml:"certificate"`
 			Certificates yaml.Node `yaml:"certificates"`
@@ -134,6 +140,11 @@ func parseMappingSteps(node *yaml.Node) ([]StepSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("解析步骤 %q 的审批配置失败: %w", stepName, err)
 		}
+		conditions, err := parseStepConditions(decoded.When)
+		if err != nil {
+			return nil, fmt.Errorf("解析步骤 %q 的 when 条件失败: %w", stepName, err)
+		}
+
 		image := strings.TrimSpace(decoded.Image)
 		kind := StepKindCommands
 		if approvalSpec != nil {
@@ -163,6 +174,7 @@ func parseMappingSteps(node *yaml.Node) ([]StepSpec, error) {
 			Privileged: decoded.Privileged,
 			Kind:       kind,
 			Approval:   approvalSpec,
+			Conditions: conditions,
 		})
 	}
 
@@ -185,6 +197,7 @@ func parseSequenceSteps(node *yaml.Node) ([]StepSpec, error) {
 			Settings     map[string]any    `yaml:"settings"`
 			Volumes      []string          `yaml:"volumes"`
 			Privileged   bool              `yaml:"privileged"`
+			When         map[string]any    `yaml:"when"`
 			Certificate  yaml.Node         `yaml:"certificate"`
 			Certificates yaml.Node         `yaml:"certificates"`
 		}
@@ -203,6 +216,11 @@ func parseSequenceSteps(node *yaml.Node) ([]StepSpec, error) {
 		approvalSpec, err := extractApprovalSpec(decoded.Settings)
 		if err != nil {
 			return nil, fmt.Errorf("解析步骤 %q 的审批配置失败: %w", name, err)
+		}
+
+		conditions, err := parseStepConditions(decoded.When)
+		if err != nil {
+			return nil, fmt.Errorf("解析步骤 %q 的 when 条件失败: %w", name, err)
 		}
 
 		image := strings.TrimSpace(decoded.Image)
@@ -234,10 +252,74 @@ func parseSequenceSteps(node *yaml.Node) ([]StepSpec, error) {
 			Privileged: decoded.Privileged,
 			Kind:       kind,
 			Approval:   approvalSpec,
+			Conditions: conditions,
 		})
 	}
 
 	return steps, nil
+}
+
+func parseStepConditions(raw map[string]any) (*StepConditions, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var conditions StepConditions
+	for key, value := range raw {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "branch", "branches":
+			branches, err := normalizeConditionValues(value)
+			if err != nil {
+				return nil, err
+			}
+			if len(branches) > 0 {
+				conditions.Branches = branches
+			}
+		}
+	}
+	if len(conditions.Branches) == 0 {
+		return nil, nil
+	}
+	return &conditions, nil
+}
+
+func normalizeConditionValues(value any) ([]string, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return []string{trimmed}, nil
+		}
+		return nil, nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("when.branch 数组仅支持字符串")
+			}
+			if trimmed := strings.TrimSpace(str); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("when.branch 必须为字符串或字符串数组")
+	}
 }
 
 func sanitizeSecrets(secrets []string) []string {

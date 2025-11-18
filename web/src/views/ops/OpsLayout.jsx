@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
 import { opsNavItems } from './Navigation';
 import './ops-layout.less';
@@ -9,13 +9,24 @@ import defaultAvatar from '../../assets/avatar/avatar.gif';
 
 const OpsLayout = () => {
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
   const avatarSrc = (user && user.avatar_url) || defaultAvatar;
   const displayName = user?.login || user?.name || '管理员';
+  const storedCluster = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return '';
+    }
+    return window.localStorage.getItem('k8s.activeCluster') || '';
+  }, []);
+  const activeCluster = searchParams.get('cluster') || storedCluster || '';
   const resolvedSection = useMemo(() => {
+    const path = location.pathname.startsWith('/ops/projects/build')
+      ? '/ops/projects/pipeline'
+      : location.pathname;
     const matched = opsNavItems.find(section =>
-      section.children.some(item => location.pathname.startsWith(item.path))
+      section.children.some(item => path.startsWith(item.path))
     );
     return matched?.key || opsNavItems[0]?.key || null;
   }, [location.pathname]);
@@ -34,9 +45,23 @@ const OpsLayout = () => {
     }
   }, [location.pathname, resolvedSection, expandedKey]);
 
-  const isActive = path => location.pathname.startsWith(path);
+  const isActive = path => {
+    if (path === '/ops/projects/pipeline') {
+      return location.pathname.startsWith(path) || location.pathname.startsWith('/ops/projects/build');
+    }
+    return location.pathname.startsWith(path);
+  };
   const toggleSection = key => {
     setExpandedKey(prev => (prev === key ? null : key));
+  };
+
+  const buildNavPath = (sectionKey, item) => {
+    if (sectionKey === 'k8s' && item.key !== 'clusters' && activeCluster) {
+      const hasQuery = item.path.includes('?');
+      const separator = hasQuery ? '&' : '?';
+      return `${item.path}${separator}cluster=${activeCluster}`;
+    }
+    return item.path;
   };
 
   const handleLogout = () => {
@@ -94,7 +119,7 @@ const OpsLayout = () => {
                         'ops-sidebar__item--active': isActive(item.path)
                       })}
                     >
-                      <NavLink to={item.path}>{item.label}</NavLink>
+                      <NavLink to={buildNavPath(section.key, item)}>{item.label}</NavLink>
                     </li>
                   ))}
                 </ul>

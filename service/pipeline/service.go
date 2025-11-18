@@ -94,6 +94,7 @@ type pipelineTaskStep struct {
 	Type       model.StepType          `json:"type,omitempty"`
 	Approval   *pipelineApprovalConfig `json:"approval,omitempty"`
 	Plugin     *pipelinePluginConfig   `json:"plugin,omitempty"`
+	Conditions *pipelineStepConditions `json:"conditions,omitempty"`
 }
 
 type pipelinePluginConfig struct {
@@ -107,6 +108,37 @@ type pipelineApprovalConfig struct {
 	Approvers []string                   `json:"approvers"`
 	Timeout   int64                      `json:"timeout"`
 	Strategy  model.StepApprovalStrategy `json:"strategy"`
+}
+
+type pipelineStepConditions struct {
+	Branches []string `json:"branches,omitempty"`
+}
+
+func (c *pipelineStepConditions) allowsBranch(branch string) bool {
+	if c == nil || len(c.Branches) == 0 {
+		return true
+	}
+	normalized := strings.TrimSpace(branch)
+	for _, candidate := range c.Branches {
+		if normalized == strings.TrimSpace(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *pipelineStepConditions) branchSummary() string {
+	if c == nil || len(c.Branches) == 0 {
+		return ""
+	}
+	return strings.Join(c.Branches, ", ")
+}
+
+func (step pipelineTaskStep) allowsBranch(branch string) bool {
+	if step.Conditions == nil {
+		return true
+	}
+	return step.Conditions.allowsBranch(branch)
 }
 
 type approvalResult int
@@ -573,6 +605,12 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		if len(stepSpec.Env) > 0 {
 			stepEnvVars = cloneStringMap(stepSpec.Env)
 		}
+		var stepConditions *pipelineStepConditions
+		if stepSpec.Conditions != nil && len(stepSpec.Conditions.Branches) > 0 {
+			stepConditions = &pipelineStepConditions{
+				Branches: append([]string{}, stepSpec.Conditions.Branches...),
+			}
+		}
 		taskSteps = append(taskSteps, pipelineTaskStep{
 			PID:        pid,
 			Name:       stepName,
@@ -585,6 +623,7 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 			Type:       stepType,
 			Approval:   approvalTaskCfg,
 			Plugin:     pluginCfg,
+			Conditions: stepConditions,
 		})
 	}
 
@@ -1182,6 +1221,30 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		}
 
 		if stepRecord.State == model.StatusSuccess || stepRecord.State == model.StatusSkipped {
+			continue
+		}
+
+		currentBranch := strings.TrimSpace(firstNonEmpty(payload.Branch, pipelineRecord.Branch))
+		if !execStep.allowsBranch(currentBranch) {
+			summary := ""
+			if execStep.Conditions != nil {
+				summary = execStep.Conditions.branchSummary()
+			}
+			logMessage := "步骤因分支条件被跳过"
+			switch {
+			case summary != "" && currentBranch != "":
+				logMessage = fmt.Sprintf("%s（当前分支 %s，仅在 %s 执行）", logMessage, currentBranch, summary)
+			case summary != "":
+				logMessage = fmt.Sprintf("%s（要求分支：%s）", logMessage, summary)
+			case currentBranch != "":
+				logMessage = fmt.Sprintf("%s（当前分支：%s）", logMessage, currentBranch)
+			}
+			if err := s.appendLogLine(ctx, stepRecord.ID, nil, logMessage); err != nil {
+				return err
+			}
+			if err := s.setStepFinished(ctx, stepRecord.ID, model.StatusSkipped, time.Now().Unix(), nil, -1); err != nil {
+				return err
+			}
 			continue
 		}
 

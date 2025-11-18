@@ -21,8 +21,12 @@ server:
 	make wire && go run cmd/*.go
 
 .PHONY: run
-run: server
+run:
+	cd web && npm run start
 
 .PHONY: web
 web:
-	cd web && npm run build && cd ..
+	cd web && npm run build
+
+.PHONY: dev
+dev: web run

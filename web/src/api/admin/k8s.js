@@ -87,3 +87,25 @@ export function getWorkloadLogs(clusterId, { kind, namespace, name, labelSelecto
     }
   });
 }
+
+export function listResourceEvents(clusterId, { namespace, kind, name, page, perPage }) {
+  return request({
+    url: `/admin/k8s/clusters/${clusterId}/resources/events`,
+    method: 'get',
+    params: {
+      namespace,
+      kind,
+      name,
+      page,
+      perPage
+    }
+  });
+}
+
+export function getPodLogs(clusterId, params) {
+  return request({
+    url: `/admin/k8s/clusters/${clusterId}/pods/logs`,
+    method: 'get',
+    params
+  });
+}
