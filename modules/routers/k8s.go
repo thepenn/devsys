@@ -551,8 +551,9 @@ func (r *k8sRouter) execPodStream(req *restful.Request, resp *restful.Response) 
 	stdinReader, stdinWriter := io.Pipe()
 	sizeQueue := newTerminalSizeQueue()
 	go r.handleExecInput(conn, stdinWriter, sizeQueue, cancel)
-	stdoutWriter := &websocketJSONWriter{conn: conn, op: "stdout"}
-	stderrWriter := &websocketJSONWriter{conn: conn, op: "stderr"}
+	writeMu := &sync.Mutex{}
+	stdoutWriter := &websocketStreamWriter{conn: conn, mu: writeMu, messageType: websocket.BinaryMessage}
+	stderrWriter := &websocketStreamWriter{conn: conn, mu: writeMu, messageType: websocket.BinaryMessage}
 	err = r.services.K8s.StreamPodExec(ctx, clusterID, model.KubernetesPodExecRequest{
 		Namespace: namespace,
 		Name:      name,
@@ -561,7 +562,7 @@ func (r *k8sRouter) execPodStream(req *restful.Request, resp *restful.Response) 
 		TTY:       true,
 	}, stdinReader, stdoutWriter, stderrWriter, sizeQueue)
 	if err != nil && !isNormalClosure(err) {
-		_ = writeShellFrame(conn, shellFrame{Op: "error", Data: err.Error()})
+		_ = writeWebsocketMessage(conn, writeMu, websocket.TextMessage, []byte(fmt.Sprintf("error: %v", err)))
 	}
 }
 
@@ -572,27 +573,27 @@ func (r *k8sRouter) handleExecInput(conn *websocket.Conn, stdin io.WriteCloser, 
 		cancel()
 	}()
 	for {
-		_, data, err := conn.ReadMessage()
+		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
-		var frame shellFrame
-		if err := json.Unmarshal(data, &frame); err != nil {
+		if messageType == websocket.TextMessage {
+			if frame, ok := parseTerminalControlFrame(data); ok {
+				switch strings.ToLower(frame.Type) {
+				case "resize":
+					if frame.Cols > 0 && frame.Rows > 0 {
+						queue.Push(frame.Cols, frame.Rows)
+					}
+					continue
+				case "close":
+					return
+				}
+			}
+		}
+		if len(data) == 0 {
 			continue
 		}
-		switch strings.ToLower(frame.Op) {
-		case "stdin":
-			if frame.Data == "" {
-				continue
-			}
-			if _, err := stdin.Write([]byte(frame.Data)); err != nil {
-				return
-			}
-		case "resize":
-			if frame.Cols > 0 && frame.Rows > 0 {
-				queue.Push(frame.Cols, frame.Rows)
-			}
-		case "close":
+		if _, err := stdin.Write(data); err != nil {
 			return
 		}
 	}
@@ -645,34 +646,48 @@ func (r *k8sRouter) podLogsStream(req *restful.Request, resp *restful.Response) 
 	}
 }
 
-type websocketJSONWriter struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-	op   string
+type websocketStreamWriter struct {
+	conn        *websocket.Conn
+	mu          *sync.Mutex
+	messageType int
 }
 
-func (w *websocketJSONWriter) Write(p []byte) (int, error) {
-	frame := shellFrame{Op: w.op, Data: string(p)}
-	if err := writeShellFrame(w.conn, frame); err != nil {
+func (w *websocketStreamWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if err := writeWebsocketMessage(w.conn, w.mu, w.messageType, p); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
-type shellFrame struct {
-	Op   string `json:"op"`
-	Data string `json:"data,omitempty"`
+type terminalControlFrame struct {
+	Type string `json:"type,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
 	Rows uint16 `json:"rows,omitempty"`
 }
 
-func writeShellFrame(conn *websocket.Conn, frame shellFrame) error {
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	data, err := json.Marshal(frame)
-	if err != nil {
-		return err
+func parseTerminalControlFrame(raw []byte) (terminalControlFrame, bool) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || !strings.HasPrefix(text, "{") || !strings.HasSuffix(text, "}") {
+		return terminalControlFrame{}, false
 	}
-	return conn.WriteMessage(websocket.TextMessage, data)
+	var frame terminalControlFrame
+	if err := json.Unmarshal([]byte(text), &frame); err != nil {
+		return terminalControlFrame{}, false
+	}
+	if strings.TrimSpace(frame.Type) == "" {
+		return terminalControlFrame{}, false
+	}
+	return frame, true
+}
+
+func writeWebsocketMessage(conn *websocket.Conn, mu *sync.Mutex, messageType int, payload []byte) error {
+	mu.Lock()
+	defer mu.Unlock()
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return conn.WriteMessage(messageType, payload)
 }
 
 func isNormalClosure(err error) bool {

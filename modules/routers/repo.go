@@ -46,16 +46,16 @@ type pipelineRunRequest struct {
 }
 
 type pipelineRunResponse struct {
-	ID       int64             `json:"id"`
-	Number   int64             `json:"number"`
-	Status   model.StatusValue `json:"status"`
-	Branch   string            `json:"branch"`
-	Created  int64             `json:"created"`
-	Finished int64             `json:"finished"`
-	Message  string            `json:"message"`
-	Author   string            `json:"author"`
-	Commit   string            `json:"commit"`
-	PrevCommit string          `json:"prev_commit"`
+	ID         int64             `json:"id"`
+	Number     int64             `json:"number"`
+	Status     model.StatusValue `json:"status"`
+	Branch     string            `json:"branch"`
+	Created    int64             `json:"created"`
+	Finished   int64             `json:"finished"`
+	Message    string            `json:"message"`
+	Author     string            `json:"author"`
+	Commit     string            `json:"commit"`
+	PrevCommit string            `json:"prev_commit"`
 }
 
 type pipelineRunListResponse struct {
@@ -371,15 +371,15 @@ func (r *repoRouter) listPipelineRuns(req *restful.Request, resp *restful.Respon
 	}
 	for _, item := range items {
 		response.Items = append(response.Items, pipelineRunResponse{
-			ID:       item.ID,
-			Number:   item.Number,
-			Status:   item.Status,
-			Branch:   item.Branch,
-			Created:  item.Created,
-			Finished: item.Finished,
-			Message:  item.Message,
-			Author:   item.Author,
-			Commit:   item.Commit,
+			ID:         item.ID,
+			Number:     item.Number,
+			Status:     item.Status,
+			Branch:     item.Branch,
+			Created:    item.Created,
+			Finished:   item.Finished,
+			Message:    item.Message,
+			Author:     item.Author,
+			Commit:     item.Commit,
 			PrevCommit: prevCommitMap[item.ID],
 		})
 	}
