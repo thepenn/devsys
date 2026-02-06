@@ -358,44 +358,27 @@
   }
 }
 
-.pod-terminal__input {
-  position: absolute;
-  top: 0;
-  left: 0;
+.pod-terminal--xterm {
+  padding: 0;
+  overflow: hidden;
+}
+
+.pod-terminal__xterm {
   width: 100%;
   height: 100%;
-  opacity: 0;
-  border: none;
-  background: transparent;
-  color: transparent;
+  min-height: 0;
+  padding: 12px;
+
+  .xterm,
+  .xterm-viewport {
+    height: 100%;
+  }
 }
 
 .pod-terminal__hint {
   margin-top: 8px;
   color: #94a3b8;
   font-size: 12px;
-}
-
-.pod-terminal__cursor {
-  display: inline-block;
-  width: 8px;
-  height: 18px;
-  margin-left: 4px;
-  background: #e2e8f0;
-  animation: pod-terminal-caret 1s steps(1) infinite;
-  vertical-align: text-bottom;
-}
-
-@keyframes pod-terminal-caret {
-  0% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
-  100% {
-    opacity: 1;
-  }
 }
 
 .pod-name {

@@ -68,7 +68,9 @@
     "webpack": "^5.64.4",
     "webpack-dev-server": "^5.2.2",
     "webpack-manifest-plugin": "^4.0.2",
-    "workbox-webpack-plugin": "^6.4.1"
+    "workbox-webpack-plugin": "^6.4.1",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
   },
   "scripts": {
     "start": "node scripts/start.js",

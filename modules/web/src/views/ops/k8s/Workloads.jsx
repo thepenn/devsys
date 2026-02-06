@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, Drawer, Dropdown, Empty, Input, InputNumber, Modal, Select, Space, Spin, Switch, Table, Tabs, Tag, message } from 'antd';
 import { EllipsisOutlined } from '@ant-design/icons';
 import { createStyles } from 'antd-style';
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import 'xterm/css/xterm.css';
 import {
   listNamespaces,
   listResources,
@@ -157,14 +160,6 @@ const buildWsUrl = (path, params = {}) => {
   return url.toString();
 };
 
-const ANSI_ESCAPE = String.fromCharCode(27);
-const BELL = String.fromCharCode(7);
-const cleanTerminalOutput = value => {
-  if (!value) return '';
-  const ansiRegex = new RegExp(`${ANSI_ESCAPE}\\[[0-9;?]*[ -/]*[@-~]`, 'g');
-  return value.replace(ansiRegex, '').replace(new RegExp(BELL, 'g'), '');
-};
-
 const WorkloadsContent = ({ clusterId }) => {
   const { styles } = useStyle();
   const [namespaces, setNamespaces] = useState([]);
@@ -194,10 +189,13 @@ const WorkloadsContent = ({ clusterId }) => {
   const [logWrap, setLogWrap] = useState(true);
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(false);
   const [podLogsDrawer, setPodLogsDrawer] = useState({ visible: false, pod: null, container: '', content: '', loading: false });
-  const [terminalDrawer, setTerminalDrawer] = useState({ visible: false, pod: null, container: '', shell: 'bash', output: '', status: 'idle' });
+  const [terminalDrawer, setTerminalDrawer] = useState({ visible: false, pod: null, container: '', shell: 'bash', status: 'idle' });
   const terminalSocketRef = useRef(null);
-  const terminalInputRef = useRef(null);
-  const terminalOutputRef = useRef(null);
+  const terminalRef = useRef(null);
+  const terminalContainerRef = useRef(null);
+  const terminalFitAddonRef = useRef(null);
+  const terminalOpenedRef = useRef(false);
+  const terminalDecoderRef = useRef(null);
 
   const fetchNamespaces = useCallback(async () => {
     try {
@@ -368,89 +366,113 @@ const WorkloadsContent = ({ clusterId }) => {
       pod,
       container,
       shell: shellType,
-      output: container ? '正在连接终端...\n' : '该 Pod 无可用容器。\n',
       status: container ? 'connecting' : 'error'
     });
   }, []);
 
-  const closeTerminalDrawer = useCallback(() => {
+  const closeTerminalSocket = useCallback(() => {
     if (terminalSocketRef.current) {
-      try {
-        terminalSocketRef.current.send(JSON.stringify({ op: 'close' }));
-      } catch (err) {
-        // ignore
-      }
       terminalSocketRef.current.close();
       terminalSocketRef.current = null;
     }
-    setTerminalDrawer({ visible: false, pod: null, container: '', shell: 'bash', output: '', status: 'idle' });
   }, []);
+
+  const closeTerminalDrawer = useCallback(() => {
+    closeTerminalSocket();
+    setTerminalDrawer({ visible: false, pod: null, container: '', shell: 'bash', status: 'idle' });
+  }, [closeTerminalSocket]);
 
   const sendTerminalFrame = useCallback(data => {
     if (!data || !terminalSocketRef.current || terminalSocketRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
     try {
-      terminalSocketRef.current.send(JSON.stringify({ op: 'stdin', data }));
+      terminalSocketRef.current.send(data);
     } catch (err) {
       console.warn('send terminal data failed', err);
     }
   }, []);
 
-  const handleTerminalKeyDown = useCallback(
-    event => {
-      if (!terminalDrawer.visible) return;
-      let payload = '';
-      const specialMap = {
-        ArrowUp: '\u001b[A',
-        ArrowDown: '\u001b[B',
-        ArrowRight: '\u001b[C',
-        ArrowLeft: '\u001b[D',
-        Delete: '\u001b[3~',
-        Home: '\u001bOH',
-        End: '\u001bOF',
-        PageUp: '\u001b[5~',
-        PageDown: '\u001b[6~'
-      };
-      if (event.key === 'Enter') {
-        payload = '\r';
-      } else if (event.key === 'Backspace') {
-        payload = '\u0008';
-      } else if (event.key === 'Tab') {
-        event.preventDefault();
-        payload = '\t';
-      } else if (event.key === 'c' && event.ctrlKey) {
-        payload = '\u0003';
-      } else if (specialMap[event.key]) {
-        payload = specialMap[event.key];
-      } else if (event.key.length === 1 && !event.metaKey && !event.altKey) {
-        payload = event.key;
+  const sendTerminalResize = useCallback(() => {
+    const ws = terminalSocketRef.current;
+    const term = terminalRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !term) {
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    } catch (err) {
+      // ignore
+    }
+  }, []);
+
+  const ensureTerminal = useCallback(() => {
+    if (terminalRef.current) {
+      return;
+    }
+    const term = new Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontSize: 14,
+      fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+      theme: {
+        background: '#0f172a',
+        foreground: '#e2e8f0'
       }
-      if (payload) {
-        event.preventDefault();
-        sendTerminalFrame(payload);
-      }
-    },
-    [sendTerminalFrame, terminalDrawer.visible]
-  );
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.onData(chunk => sendTerminalFrame(chunk));
+    term.onResize(() => sendTerminalResize());
+    terminalRef.current = term;
+    terminalFitAddonRef.current = fitAddon;
+  }, [sendTerminalFrame, sendTerminalResize]);
+
+  const openTerminal = useCallback(() => {
+    ensureTerminal();
+    if (!terminalRef.current || !terminalContainerRef.current || !terminalFitAddonRef.current) {
+      return;
+    }
+    if (!terminalOpenedRef.current) {
+      terminalRef.current.open(terminalContainerRef.current);
+      terminalOpenedRef.current = true;
+    }
+    terminalFitAddonRef.current.fit();
+    terminalRef.current.focus();
+  }, [ensureTerminal]);
+
+  const writeTerminal = useCallback(data => {
+    if (data === undefined || data === null || !terminalRef.current) {
+      return;
+    }
+    terminalRef.current.write(String(data));
+  }, []);
 
   const handleTerminalContainerChange = value => {
     setTerminalDrawer(prev => ({
       ...prev,
       container: value,
-      output: value ? '正在连接终端...\n' : '该容器不可用。\n',
       status: value ? 'connecting' : 'error'
     }));
   };
 
   const handleTerminalClear = () => {
-    setTerminalDrawer(prev => ({ ...prev, output: '' }));
+    terminalRef.current?.clear();
+    terminalRef.current?.focus();
   };
 
   useEffect(() => {
-    if (!terminalDrawer.visible || !terminalDrawer.pod || !terminalDrawer.container) {
+    if (!terminalDrawer.visible) {
       return;
     }
+    openTerminal();
+    terminalRef.current?.reset();
+    if (!terminalDrawer.pod || !terminalDrawer.container) {
+      writeTerminal('该 Pod 无可用容器。\r\n');
+      setTerminalDrawer(prev => ({ ...prev, status: 'error' }));
+      return;
+    }
+
     const shellPath = terminalDrawer.shell === 'sh' ? '/bin/sh' : '/bin/bash';
     const wsUrl = buildWsUrl(
       `/admin/k8s/clusters/${clusterId}/pods/${terminalDrawer.pod.namespace}/${terminalDrawer.pod.name}/exec/stream`,
@@ -459,59 +481,94 @@ const WorkloadsContent = ({ clusterId }) => {
         container: terminalDrawer.container
       }
     );
-    setTerminalDrawer(prev => ({ ...prev, output: '正在连接终端...\n', status: 'connecting' }));
+    setTerminalDrawer(prev => ({ ...prev, status: 'connecting' }));
+    writeTerminal(`正在连接终端 ${terminalDrawer.pod.name}/${terminalDrawer.container} ...\r\n`);
     const ws = new WebSocket(wsUrl);
     terminalSocketRef.current = ws;
-    ws.onopen = () => setTerminalDrawer(prev => ({ ...prev, status: 'connected' }));
-    ws.onerror = () => setTerminalDrawer(prev => ({ ...prev, status: 'error' }));
-    ws.onclose = () => setTerminalDrawer(prev => ({ ...prev, status: 'closed' }));
-    ws.onmessage = event => {
-      try {
-        const frame = JSON.parse(event.data);
-        if (frame?.op === 'stdout' || frame?.op === 'stderr') {
-          setTerminalDrawer(prev => ({
-            ...prev,
-            output: (prev.output || '') + cleanTerminalOutput(frame.data || '')
-          }));
-        } else if (frame?.op === 'error') {
-          setTerminalDrawer(prev => ({
-            ...prev,
-            output: (prev.output || '') + `\n${cleanTerminalOutput(frame.data || '终端出错')}\n`,
-            status: 'error'
-          }));
-        }
-      } catch (err) {
-        setTerminalDrawer(prev => ({
-          ...prev,
-          output: (prev.output || '') + cleanTerminalOutput(event.data)
-        }));
+
+    ws.onopen = () => {
+      if (terminalSocketRef.current !== ws) return;
+      setTerminalDrawer(prev => ({ ...prev, status: 'connected' }));
+      sendTerminalResize();
+      terminalRef.current?.focus();
+    };
+
+    ws.onerror = () => {
+      if (terminalSocketRef.current !== ws) return;
+      setTerminalDrawer(prev => ({ ...prev, status: 'error' }));
+      writeTerminal('\r\n终端连接失败\r\n');
+    };
+
+    ws.onclose = () => {
+      if (terminalSocketRef.current !== ws) return;
+      setTerminalDrawer(prev => ({ ...prev, status: 'closed' }));
+      writeTerminal('\r\n终端已断开\r\n');
+    };
+
+    ws.onmessage = async event => {
+      if (terminalSocketRef.current !== ws) return;
+      if (typeof event.data === 'string') {
+        writeTerminal(event.data);
+        return;
+      }
+      if (event.data instanceof ArrayBuffer) {
+        const decoder = terminalDecoderRef.current || new TextDecoder('utf-8');
+        terminalDecoderRef.current = decoder;
+        writeTerminal(decoder.decode(new Uint8Array(event.data)));
+        return;
+      }
+      if (event.data instanceof Blob) {
+        const text = await event.data.text();
+        if (terminalSocketRef.current !== ws) return;
+        writeTerminal(text);
       }
     };
+
     return () => {
-      ws.close();
-      terminalSocketRef.current = null;
+      if (terminalSocketRef.current === ws) {
+        closeTerminalSocket();
+      }
     };
-  }, [terminalDrawer.visible, terminalDrawer.pod, terminalDrawer.container, terminalDrawer.shell, clusterId]);
+  }, [
+    closeTerminalSocket,
+    clusterId,
+    openTerminal,
+    sendTerminalResize,
+    terminalDrawer.visible,
+    terminalDrawer.pod,
+    terminalDrawer.container,
+    terminalDrawer.shell,
+    writeTerminal
+  ]);
 
   useEffect(() => {
-    if (terminalDrawer.visible && terminalInputRef.current) {
-      terminalInputRef.current.focus();
+    if (!terminalDrawer.visible) {
+      return;
     }
-  }, [terminalDrawer.visible]);
-
-  useEffect(() => {
-    if (terminalOutputRef.current) {
-      terminalOutputRef.current.scrollTop = terminalOutputRef.current.scrollHeight;
-    }
-  }, [terminalDrawer.output]);
+    const fit = () => {
+      terminalFitAddonRef.current?.fit();
+      sendTerminalResize();
+    };
+    const timer = window.setTimeout(fit, 100);
+    window.addEventListener('resize', fit);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('resize', fit);
+    };
+  }, [sendTerminalResize, terminalDrawer.visible]);
 
   useEffect(
     () => () => {
-      if (terminalSocketRef.current) {
-        terminalSocketRef.current.close();
+      closeTerminalSocket();
+      terminalDecoderRef.current = null;
+      if (terminalRef.current) {
+        terminalRef.current.dispose();
+        terminalRef.current = null;
       }
+      terminalFitAddonRef.current = null;
+      terminalOpenedRef.current = false;
     },
-    []
+    [closeTerminalSocket]
   );
 
   const handleTogglePods = useCallback(
@@ -1638,19 +1695,10 @@ const WorkloadsContent = ({ clusterId }) => {
             <Button onClick={handleTerminalClear}>清屏</Button>
           </Space>
         </div>
-        <div className="pod-terminal" onClick={() => terminalInputRef.current?.focus()}>
-          <pre ref={terminalOutputRef}>
-            {terminalDrawer.output || '暂无终端输出'}
-            {terminalDrawer.visible && terminalDrawer.status === 'connected' ? <span className="pod-terminal__cursor" /> : null}
-          </pre>
-          <textarea
-            ref={terminalInputRef}
-            className="pod-terminal__input"
-            onKeyDown={handleTerminalKeyDown}
-            spellCheck={false}
-          />
+        <div className="pod-terminal pod-terminal--xterm" onClick={() => terminalRef.current?.focus()}>
+          <div ref={terminalContainerRef} className="pod-terminal__xterm" />
         </div>
-        <div className="pod-terminal__hint">按 Enter 发送命令，Ctrl+C 终止当前执行。</div>
+        <div className="pod-terminal__hint">已切换为 xterm 交互终端，支持标准键盘输入（Backspace、方向键、Tab、Ctrl+C）。</div>
       </Drawer>
     </>
   );

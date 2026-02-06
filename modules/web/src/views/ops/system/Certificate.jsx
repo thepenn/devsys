@@ -34,10 +34,56 @@ const TYPE_OPTIONS = [
   { value: 'custom', label: '自定义' }
 ];
 
+const CONFIG_TEMPLATES = {
+  git: {
+    username: '',
+    password: ''
+  },
+  docker: {
+    username: '',
+    password: '',
+    repo: 'registry.example.com/namespace'
+  },
+  mysql: {
+    host: '127.0.0.1',
+    port: '3306',
+    database: '',
+    username: '',
+    password: ''
+  },
+  ldap: {
+    server: 'ldap.example.com',
+    port: 389,
+    base_dn: 'dc=example,dc=com',
+    search_base_dn: 'ou=users,dc=example,dc=com',
+    bind_dn: 'cn=admin,dc=example,dc=com',
+    password: '',
+    user_attr: 'uid',
+    email_attr: 'mail',
+    group_attr: 'memberOf'
+  },
+  kubernetes: {
+    name: 'prod-cluster',
+    kubeconfig: ''
+  },
+  custom: {}
+};
+
+const TYPE_CONFIG_HINTS = {
+  git: 'Git 凭证建议包含 username / password。',
+  docker: 'Docker 凭证建议包含 username / password / repo。',
+  mysql: 'MySQL 凭证建议包含 host / port / database / username / password。',
+  ldap: 'LDAP 凭证建议包含 server / bind_dn / password 等字段。',
+  kubernetes: 'Kubernetes 凭证至少应包含 kubeconfig。',
+  custom: '自定义类型可按业务需要自由定义 JSON。'
+};
+
+const buildTemplateConfig = type => JSON.stringify(CONFIG_TEMPLATES[type] ?? CONFIG_TEMPLATES.custom, null, 2);
+
 const DEFAULT_FORM_VALUES = {
   name: '',
   type: 'git',
-  config: '{\n  "username": "",\n  "password": ""\n}'
+  config: buildTemplateConfig('git')
 };
 
 const Certificate = () => {
@@ -54,6 +100,7 @@ const Certificate = () => {
   const [editing, setEditing] = useState(null);
   const [detail, setDetail] = useState({ visible: false, record: null });
   const [form] = Form.useForm();
+  const activeType = Form.useWatch('type', form) || DEFAULT_FORM_VALUES.type;
   const location = useLocation();
 
   const fetchData = useCallback(async () => {
@@ -101,7 +148,10 @@ const Certificate = () => {
 
   const openCreateModal = () => {
     setEditing(null);
-    form.setFieldsValue(DEFAULT_FORM_VALUES);
+    form.setFieldsValue({
+      ...DEFAULT_FORM_VALUES,
+      config: buildTemplateConfig(DEFAULT_FORM_VALUES.type)
+    });
     setModalVisible(true);
   };
 
@@ -131,6 +181,17 @@ const Certificate = () => {
     setModalVisible(false);
     setEditing(null);
     form.resetFields();
+  };
+
+  const handleTypeChange = value => {
+    if (!editing) {
+      form.setFieldsValue({
+        type: value,
+        config: buildTemplateConfig(value)
+      });
+      return;
+    }
+    form.setFieldValue('type', value);
   };
 
   const handleModalSubmit = async () => {
@@ -302,26 +363,24 @@ const Certificate = () => {
             label="类型"
             rules={[{ required: true, message: '请选择凭证类型' }]}
           >
-            <Select options={TYPE_OPTIONS} />
+            <Select options={TYPE_OPTIONS} onChange={handleTypeChange} />
           </Form.Item>
           <Form.Item
             name="config"
             label={
               <Space>
                 <span>配置 (JSON / 文本)</span>
-                <Tooltip title="使用标准 JSON 键值表示凭证内容，例如包含 username/password、token 等">
+                <Tooltip title={TYPE_CONFIG_HINTS[activeType] || TYPE_CONFIG_HINTS.custom}>
                   <Tag color="default">JSON</Tag>
                 </Tooltip>
               </Space>
             }
+            extra={TYPE_CONFIG_HINTS[activeType] || TYPE_CONFIG_HINTS.custom}
             rules={[{ required: true, message: '请输入配置' }]}
           >
             <Input.TextArea
               rows={10}
-              placeholder={`{
-  "username": "",
-  "password": ""
-}`}
+              placeholder={buildTemplateConfig(activeType)}
             />
           </Form.Item>
         </Form>

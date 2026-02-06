@@ -6,6 +6,7 @@ import './ops-layout.less';
 import { useAuth } from '../../context/AuthContext';
 import { clearToken } from '../../utils/auth';
 import defaultAvatar from '../../assets/avatar/avatar.gif';
+import { listClusters } from '../../api/admin/k8s';
 
 const OpsLayout = () => {
   const location = useLocation();
@@ -31,9 +32,52 @@ const OpsLayout = () => {
     return matched?.key || opsNavItems[0]?.key || null;
   }, [location.pathname]);
   const [expandedKey, setExpandedKey] = useState(resolvedSection);
+  const [hasK8sClusters, setHasK8sClusters] = useState(null);
   const lastPathRef = useRef(location.pathname);
   const profileRef = useRef(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const displayNavItems = useMemo(
+    () =>
+      opsNavItems.map(section => {
+        if (section.key === 'k8s' && hasK8sClusters === false) {
+          return {
+            ...section,
+            children: section.children.filter(item => item.key === 'clusters')
+          };
+        }
+        return section;
+      }),
+    [hasK8sClusters]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadClusters = async () => {
+      try {
+        const list = await listClusters();
+        if (!cancelled) {
+          setHasK8sClusters(Array.isArray(list) ? list.length > 0 : false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setHasK8sClusters(null);
+        }
+      }
+    };
+    loadClusters();
+    const onClustersUpdated = () => {
+      loadClusters();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('k8s-clusters-updated', onClustersUpdated);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('k8s-clusters-updated', onClustersUpdated);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (lastPathRef.current === location.pathname) {
@@ -94,7 +138,7 @@ const OpsLayout = () => {
           <p>DevOps Platform</p>
         </div>
         <div className="ops-sidebar__menu">
-          {opsNavItems.map(section => (
+          {displayNavItems.map(section => (
             <div key={section.key} className="ops-sidebar__section">
               <button
                 type="button"

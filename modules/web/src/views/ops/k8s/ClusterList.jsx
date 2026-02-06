@@ -16,6 +16,11 @@ const ClusterList = () => {
   const [editingCluster, setEditingCluster] = useState(null);
   const [clusterForm] = Form.useForm();
   const navigate = useNavigate();
+  const notifyClustersUpdated = () => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('k8s-clusters-updated'));
+    }
+  };
 
   const fetchClusters = useCallback(async () => {
     setLoading(true);
@@ -86,6 +91,7 @@ const ClusterList = () => {
       }
       closeClusterDrawer();
       fetchClusters();
+      notifyClustersUpdated();
     } catch (err) {
       if (err?.errorFields) return;
       message.error(err.message || '保存集群失败');
@@ -106,6 +112,7 @@ const ClusterList = () => {
           await deleteCertificate(record.id);
           message.success('集群已删除');
           fetchClusters();
+          notifyClustersUpdated();
         } catch (err) {
           message.error(err.message || '删除失败');
         }
@@ -134,7 +141,15 @@ const ClusterList = () => {
       width: 320,
       render: (_, record) => (
         <Space>
-          <Button type="primary" onClick={() => navigate(`/ops/k8s/workloads?cluster=${record.id}`)}>
+          <Button
+            type="primary"
+            onClick={() => {
+              if (typeof window !== 'undefined') {
+                window.localStorage.setItem('k8s.activeCluster', String(record.id));
+              }
+              navigate(`/ops/k8s/workloads?cluster=${record.id}`);
+            }}
+          >
             进入工作台
           </Button>
           <Button onClick={() => openClusterDrawer(record)}>编辑配置</Button>
