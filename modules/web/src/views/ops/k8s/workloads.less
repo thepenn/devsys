@@ -326,13 +326,35 @@
   padding: 12px;
   border-radius: 12px;
   border: 1px solid #1f2937;
-  max-height: 420px;
   overflow: auto;
+  min-height: 0;
 
   pre {
     margin: 0;
     white-space: pre-wrap;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+}
+
+.pod-logs-drawer {
+  .ant-drawer-body {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 120px);
+  }
+
+  .pod-log-toolbar {
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  .pod-log-viewer {
+    flex: 1;
+  }
+
+  .pod-log-viewer > .ant-spin-nested-loading,
+  .pod-log-viewer > .ant-spin-nested-loading > .ant-spin-container {
+    height: 100%;
   }
 }
 

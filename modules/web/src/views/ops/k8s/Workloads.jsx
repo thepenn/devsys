@@ -189,6 +189,7 @@ const WorkloadsContent = ({ clusterId }) => {
   const [logWrap, setLogWrap] = useState(true);
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(false);
   const [podLogsDrawer, setPodLogsDrawer] = useState({ visible: false, pod: null, container: '', content: '', loading: false });
+  const podLogViewerRef = useRef(null);
   const [terminalDrawer, setTerminalDrawer] = useState({ visible: false, pod: null, container: '', shell: 'bash', status: 'idle' });
   const terminalSocketRef = useRef(null);
   const terminalRef = useRef(null);
@@ -357,6 +358,18 @@ const WorkloadsContent = ({ clusterId }) => {
     setPodLogsDrawer(prev => ({ ...prev, loading: true }));
     fetchPodLogsContent(podLogsDrawer.pod, podLogsDrawer.container);
   }, [podLogsDrawer.visible, podLogsDrawer.pod, podLogsDrawer.container, fetchPodLogsContent]);
+
+  useEffect(() => {
+    if (!podLogsDrawer.visible || podLogsDrawer.loading) {
+      return;
+    }
+    const timer = window.requestAnimationFrame(() => {
+      const node = podLogViewerRef.current;
+      if (!node) return;
+      node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(timer);
+  }, [podLogsDrawer.visible, podLogsDrawer.loading, podLogsDrawer.content]);
 
   const openPodTerminal = useCallback((pod, shellType = 'bash') => {
     if (!pod) return;
@@ -1636,6 +1649,7 @@ const WorkloadsContent = ({ clusterId }) => {
         />
       </Drawer>
       <Drawer
+        className="pod-logs-drawer"
         width={720}
         title={podLogsDrawer.pod ? `Pod 日志 · ${podLogsDrawer.pod.name}` : 'Pod 日志'}
         open={podLogsDrawer.visible}
@@ -1643,7 +1657,7 @@ const WorkloadsContent = ({ clusterId }) => {
         destroyOnClose
         maskClosable
       >
-        <Space style={{ marginBottom: 12 }} wrap>
+        <Space className="pod-log-toolbar" wrap>
           <Select
             placeholder="选择容器"
             style={{ minWidth: 200 }}
@@ -1655,7 +1669,7 @@ const WorkloadsContent = ({ clusterId }) => {
             刷新
           </Button>
         </Space>
-        <div className="pod-log-viewer">
+        <div className="pod-log-viewer" ref={podLogViewerRef}>
           <Spin spinning={podLogsDrawer.loading}>
             <pre>{podLogsDrawer.content || '暂无日志'}</pre>
           </Spin>

@@ -1,7 +1,11 @@
 .table-pagination {
   display: flex;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 12px 16px;
   margin-top: 8px;
   font-size: 13px;
@@ -27,6 +31,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;
+    margin-left: auto;
   }
 
   &__status {
@@ -35,17 +41,22 @@
   }
 
   &__arrow {
-    border: none;
-    background: transparent;
-    color: #475569;
+    border: 1px solid #dbe5f1;
+    background: #fff;
+    color: #334155;
     cursor: pointer;
     font-size: 16px;
-    padding: 0 4px;
+    line-height: 1;
+    min-width: 30px;
+    padding: 5px 8px;
+    border-radius: 6px;
     transition: color 0.15s ease;
   }
 
   &__arrow:disabled {
-    color: #cbd5f5;
+    color: #cbd5e1;
+    border-color: #e2e8f0;
+    background: #f8fafc;
     cursor: not-allowed;
   }
 }
@@ -53,5 +64,5 @@
 .table-pagination--flush {
   margin-top: 12px;
   border-top: 1px solid #e2e8f0;
-  padding: 12px 0 0;
+  padding: 12px 32px 0 12px;
 }

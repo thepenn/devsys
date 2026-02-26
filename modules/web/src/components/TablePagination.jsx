@@ -57,8 +57,10 @@ const TablePagination = ({
           className="table-pagination__arrow"
           onClick={handlePrev}
           disabled={current <= 1}
+          title="上一页"
+          aria-label="上一页"
         >
-          ←
+          {'<'}
         </button>
         <span className="table-pagination__status">
           {current} / {totalPages}
@@ -68,8 +70,10 @@ const TablePagination = ({
           className="table-pagination__arrow"
           onClick={handleNext}
           disabled={current >= totalPages}
+          title="下一页"
+          aria-label="下一页"
         >
-          →
+          {'>'}
         </button>
       </div>
     </div>
