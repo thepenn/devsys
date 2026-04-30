@@ -97,42 +97,61 @@ Schema migration runs automatically on startup via GORM `AutoMigrate`.
 
 #### Development Mode (separate backend + frontend)
 
-Terminal 1 — Start the backend:
+Terminal 1 — Start the backend (regenerates Wire + `go run cmd/*.go`, port 8080):
 
 ```bash
-make server
+make server          # or: make run (alias)
 ```
 
-Terminal 2 — Start the frontend dev server:
+Terminal 2 — Start the frontend dev server (CRA dev server, port 3002, proxies API to `localhost:8080`):
 
 ```bash
-make run
+make web-dev
 ```
 
-The frontend dev server proxies API requests to the backend at `localhost:8080`.
+`make dev` prints these two commands as a hint — it doesn't actually start anything.
 
-#### Production Mode (single binary)
+#### Production Mode (single binary, embedded SPA)
 
 ```bash
-# Build the frontend
+# Build the frontend bundle once into modules/web/dist/
 make web
 
-# Build and run (Wire + Go)
+# Start the backend; web.go embeds dist via //go:embed and serves the SPA at /
 make server
 ```
 
-Access the application at `http://localhost:8080`.
+Access the application at `http://localhost:8080` — both API (`/api/v1/...`) and SPA (`/`) come from the same port.
+
+#### Single-image Deployment (Docker)
+
+For production hosts that just want one container:
+
+```bash
+# One-shot: pre-build SPA + Wire on the host, then docker build
+make docker-image                     # IMAGE_NAME=devsys IMAGE_TAG=$(git describe --tags --always)
+# Override for a private registry:
+#   make docker-image IMAGE_NAME=registry.example.com/team/devsys IMAGE_TAG=v1.2.3
+
+# Run with mounted docker socket + persistent workspace
+make docker-run
+```
+
+See [README.md](../README.md#single-image-deployment-docker) for the full `docker run` example with required env vars.
 
 ### Makefile Targets
 
-| Target | Command | Description |
-|--------|---------|-------------|
-| `make server` | Wire generate + `go run` | Start the backend server |
-| `make run` | `npm run start` | Start the frontend dev server |
-| `make web` | `npm run build` | Build the frontend for production |
-| `make wire` | `wire gen` | Regenerate Wire injectors |
-| `make fmt` | `go fmt ./...` | Format Go source code |
-| `make dev` | `web` + `run` | Build frontend and start dev server |
+| Target | Description |
+|--------|-------------|
+| `make server` | Regenerate Wire injectors and start the backend (`go run cmd/*.go`); warns if `web/dist/index.html` is missing. |
+| `make run` | Alias for `make server` (legacy entry kept for habit). |
+| `make web-dev` | Start the React dev server (`npm run start`, port 3002). |
+| `make web` | Build the production SPA bundle into `modules/web/dist/`. |
+| `make wire` | Regenerate `modules/cmd/wire/wire_gen.go`. |
+| `make fmt` | Run `go fmt ./...` over the backend. |
+| `make dev` | Print the two-terminal dev workflow (does not start anything). |
+| `make docker-image` | Pre-build SPA (`make web`) + Wire (`make wire`) on the host, then `docker build` the single-binary image. Override with `IMAGE_NAME=` / `IMAGE_TAG=`. |
+| `make docker-run` | `docker run` the latest image with `/var/run/docker.sock` mounted and `modules/.env` loaded. |
 
 ### Verifying the Setup
 
@@ -242,42 +261,61 @@ CREATE DATABASE devops CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 #### 开发模式（前后端分离）
 
-终端 1 — 启动后端：
+终端 1 — 启动后端（自动 Wire 生成 + `go run cmd/*.go`，端口 8080）：
 
 ```bash
-make server
+make server          # 或: make run (别名)
 ```
 
-终端 2 — 启动前端开发服务器：
+终端 2 — 启动前端开发服务器（CRA dev server，端口 3002，API 代理到 `localhost:8080`）：
 
 ```bash
-make run
+make web-dev
 ```
 
-前端开发服务器会将 API 请求代理到 `localhost:8080` 的后端。
+`make dev` 现在只是打印这两条命令的帮助信息，不实际启动任何东西。
 
-#### 生产模式（单文件部署）
+#### 生产模式（单二进制，前端嵌入）
 
 ```bash
-# 构建前端
+# 把前端 bundle 一次性构建到 modules/web/dist/
 make web
 
-# 构建并运行（Wire + Go）
+# 启动后端；web.go 通过 //go:embed 把 dist 嵌进二进制, 在 / 路径直接返回 SPA
 make server
 ```
 
-访问 `http://localhost:8080` 打开应用。
+访问 `http://localhost:8080` 打开应用 —— API（`/api/v1/...`）和 SPA（`/`）共用同一个端口。
+
+#### 单镜像部署（Docker）
+
+只想跑一个容器的生产部署：
+
+```bash
+# 一键: 宿主机预构建 SPA + Wire, 然后 docker build
+make docker-image                     # IMAGE_NAME=devsys IMAGE_TAG=$(git describe --tags --always)
+# 推私有 registry 时覆盖:
+#   make docker-image IMAGE_NAME=registry.example.com/team/devsys IMAGE_TAG=v1.2.3
+
+# 挂 docker socket + 持久化 workspace 跑起来
+make docker-run
+```
+
+完整的 `docker run` 示例（含必填 env）见 [README.md](../README.md#单镜像部署-docker)。
 
 ### Makefile 命令
 
-| 目标 | 命令 | 说明 |
-|------|------|------|
-| `make server` | Wire 生成 + `go run` | 启动后端服务 |
-| `make run` | `npm run start` | 启动前端开发服务器 |
-| `make web` | `npm run build` | 构建生产环境前端 |
-| `make wire` | `wire gen` | 重新生成 Wire 注入器 |
-| `make fmt` | `go fmt ./...` | 格式化 Go 源代码 |
-| `make dev` | `web` + `run` | 构建前端并启动开发服务器 |
+| 目标 | 说明 |
+|------|------|
+| `make server` | 重新生成 Wire 注入器 + 启动后端（`go run cmd/*.go`）；如果 `web/dist/index.html` 缺失会打印警告。 |
+| `make run` | `make server` 的别名（兼容旧入口）。 |
+| `make web-dev` | 启动 React 开发服务器（`npm run start`，端口 3002）。 |
+| `make web` | 构建生产 SPA bundle 到 `modules/web/dist/`。 |
+| `make wire` | 重新生成 `modules/cmd/wire/wire_gen.go`。 |
+| `make fmt` | 后端跑 `go fmt ./...`。 |
+| `make dev` | 打印开发模式的双终端工作流（不实际启动任何东西）。 |
+| `make docker-image` | 宿主机预构建 SPA（`make web`）+ Wire（`make wire`），然后 `docker build` 出单二进制镜像。`IMAGE_NAME=` / `IMAGE_TAG=` 可覆盖。 |
+| `make docker-run` | `docker run` 最新镜像，自动挂 `/var/run/docker.sock` 并加载 `modules/.env`。 |
 
 ### 验证安装
 
