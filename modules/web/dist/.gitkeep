@@ -1,0 +1,6 @@
+# 占位文件: 保证 modules/web/web.go 的 //go:embed all:dist 在没跑 make web 时也能编译.
+# make web 之后 SPA 产物 (index.html, static/*) 会与本文件并存, 一并被嵌入二进制.
+# 运行时本文件就是无害的空文件, Lookup 不会触达它.
+#
+# modules/web/.gitignore 里 dist/ 被整体忽略, 但 !dist/.gitkeep 例外放行,
+# 所以本文件正常 git add 就能进 commit, 无需 -f 强制.

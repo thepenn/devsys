@@ -9,7 +9,11 @@ node_modules/
 
 # 构建产物 (Go 通过 //go:embed all:dist 嵌入二进制)
 # .gitkeep 占位文件单独保留, 让 web.go 在 dist 仅有占位时也能编译.
-dist/
+#
+# 注意: 必须用 dist/* 而不是 dist/ —— git 规则是父目录被 ignore 后, 子文件无法
+# 用 negation re-include (它不会再去 walk 那个目录). 所以下面的 !dist/.gitkeep
+# 例外只在 dist 目录本身没被 ignore 时才生效.
+dist/*
 !dist/.gitkeep
 
 # CRA / webpack 缓存
