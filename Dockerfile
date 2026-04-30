@@ -14,12 +14,23 @@
 # 否则 dist 缺失 SPA 资源会少, wire_gen.go 落后会导致 DI 不一致.
 
 # ---- 1) Backend ----
-FROM golang:1.24-alpine AS go-builder
+# go-builder 强制 BUILDPLATFORM (host 原生), 避免在 ARM host 构建 amd64 镜像
+# 时 BuildKit 启 amd64 emulation, QEMU 翻译 Go toolchain (compile/asm 用了
+# 大量 SSE 指令) 撞 SIGSEGV / "signal: segmentation fault (core dumped)".
+# 通过 GOOS/GOARCH 让 Go cross-compile 出目标平台二进制. 我们 CGO_ENABLED=0
+# 已经满足无 cgo 前提, 纯 Go 跨平台编译完全可行.
+# 详见 https://docs.docker.com/build/building/multi-platform/#cross-compilation
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS go-builder
 RUN apk add --no-cache git
 WORKDIR /src
+# BuildKit 自动注入 TARGETOS / TARGETARCH, Dockerfile 必须显式声明 ARG 才能
+# 在 ENV 里引用. 默认值是 linux/amd64, 单纯 docker build 没传 platform 也能跑.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ENV GOPROXY=https://goproxy.cn,direct \
     CGO_ENABLED=0 \
-    GOOS=linux \
+    GOOS=$TARGETOS \
+    GOARCH=$TARGETARCH \
     GOFLAGS=-trimpath
 # 先拉依赖, 充分利用 layer cache.
 COPY modules/go.mod modules/go.sum ./modules/
