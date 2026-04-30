@@ -177,6 +177,38 @@ trigger -> spec.Parse -> StepKindBuild
 - `failed to read dockerfile: open Dockerfile: no such file or directory` with the BuildKit log showing `transferring dockerfile: 2B`: the host workspace directory is not in the Docker daemon's file-sharing list, so the bind mount silently lands on an empty directory inside the VM and the controller-written `Dockerfile` is invisible to the container. The default workspace root has been moved to `${HOME}/.devsys-workspace` (Colima / Docker Desktop / OrbStack all share `${HOME}` out of the box). If you overrode `PIPELINE_WORKSPACE_ROOT` to e.g. `/tmp/...` on Colima, switch back to the default or `colima start --mount /tmp:w`. See the "Workspace sharing across steps" section below.
 - `fatal: detected dubious ownership in repository at '/workspace'`: git 2.35+ refuses to operate when the `.git` directory's UID differs from the running process UID (CVE-2022-24765). The host bind mount preserves the host user UID (e.g. `501` on macOS) while the step container typically runs as root (UID 0), so git always sees a mismatch. The engine now auto-injects `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*` into every step container (only git reads them; other tools ignore). Users no longer need a manual `git config --global --add safe.directory /workspace` in their clone step. To opt out (e.g. you want strict ownership checking and provide your own config), set `GIT_CONFIG_COUNT: ""` (or your own larger config sequence) in the step's `env:`.
 
+### Building devsys itself in a CI pipeline
+
+When the devsys pipeline builds the devsys docker image, **clone + `kind: build` is not enough** — the repo only ships a `.gitkeep` placeholder under `modules/web/dist/` so the host-side `make docker-image` flow can pre-build the SPA via `make web`. In CI there is no Makefile to lean on, so the BuildKit step would `go build` against an empty `dist/` directory and produce an image whose `/` route returns 404. Add an explicit `web-build` step before `kind: build`:
+
+```yaml
+steps:
+  - name: clone
+    image: alpine/git:2.45.2
+    commands:
+      - git clone --depth 1 --branch main https://github.com/thepenn/devsys.git .
+  - name: web-build
+    image: node:20-alpine
+    commands:
+      - cd modules/web
+      - npm ci --no-audit --no-fund
+      - npm run build
+  - name: build-and-push-image
+    kind: build
+    certificate: aliyun_docker_registry
+    build:
+      repo: sixx/devsys
+      tags:
+        - latest
+        - build-${CI_PIPELINE_NUMBER}
+```
+
+Notes:
+- `wire_gen.go` is committed in the repo, so CI does not need to regenerate it.
+- The same engine improvements that make local `make docker-image` work — `containerSafeEnv` strips host TMPDIR, `gitSafeDirectoryEnv` injects safe.directory, workspace defaults to `${HOME}/.devsys-workspace` — apply automatically to step containers in this pipeline. No extra config required.
+- `npm ci` requires `modules/web/package-lock.json` to be tracked. If you maintain a fork that drops the lockfile, switch to `npm install` (slower but works) or commit the lockfile.
+- The webpack build inside `node:20-alpine` peaks at 2-3 GB RSS. If the controller VM is tight on RAM, prefer running the pipeline against a host with at least 4 GB free, or split webpack via `NODE_OPTIONS=--max-old-space-size=2048`.
+
 ### Workspace sharing across steps
 
 Every step container in a single run bind-mounts the same host directory `<workspace_root>/<repo>/<pipeline_id>/` to `/workspace`. So:
@@ -686,6 +718,38 @@ trigger -> spec.Parse -> StepKindBuild
 - `failed to read dockerfile: failed to create temp dir: stat /var/folders/.../T/: no such file or directory`（或其它看起来像宿主路径的 ENOENT）：旧版引擎把控制进程的 env (`TMPDIR`、`HOME`、`PATH`、`XPC_*`、`Apple_*` 等) 全量灌进了步骤容器。macOS / launchd 的路径在 Linux 容器里当然不存在，BuildKit `os.MkdirTemp(os.TempDir(), ...)` 直接挂。引擎现在会用 `containerSafeEnv` 剥掉这些宿主专属 key，并对 build 步显式设 `TMPDIR=/tmp`、`HOME=/tmp`。如果仍然报，检查 `step.env:` 里是否手抖写了 `TMPDIR=/some/host/path`，改成容器内合法路径即可。
 - `failed to read dockerfile: open Dockerfile: no such file or directory`，BuildKit 日志显示 `transferring dockerfile: 2B`：宿主机 workspace 路径不在 Docker daemon 的 file-sharing 列表里，bind mount 在 VM 内静默落到一个空目录，控制进程写入的 `Dockerfile`（包括 `RepoPipelineConfig.Dockerfile` 兜底注入）容器是看不到的。默认 workspace root 已改成 `${HOME}/.devsys-workspace`（Colima / Docker Desktop / OrbStack 默认都共享 `${HOME}`，开箱即用）。如果你显式 `PIPELINE_WORKSPACE_ROOT=/tmp/...` 覆盖了，在 Colima 上 `/tmp` 默认不共享会复现该问题，要么改回默认，要么 `colima start --mount /tmp:w`。详见下面的「Workspace 共享语义」一节。
 - `fatal: detected dubious ownership in repository at '/workspace'`：git 2.35+ 的 CVE-2022-24765 加固，`.git` 目录的 owner UID 跟当前进程 UID 不一致就拒绝操作。host bind mount 透传宿主用户 UID（macOS 一般是 `501`），step container 通常以 root（UID 0）跑，必然不匹配。引擎现在会自动给所有 step container 注入 `GIT_CONFIG_COUNT=1`、`GIT_CONFIG_KEY_0=safe.directory`、`GIT_CONFIG_VALUE_0=*` 三条 env（只有 git 会读，其它工具忽略），用户不用再在 clone step 手动 `git config --global --add safe.directory /workspace`。想关掉（例如生产追求严格 ownership 校验、自己注入更完整的 config 序列）：在 step 的 `env:` 里把 `GIT_CONFIG_COUNT` 设成空串或更大数字即可。
+
+### 在 CI pipeline 里构建 devsys 镜像
+
+devsys 自己的 pipeline 用 `kind: build` 构建 devsys 镜像时，**只 clone + build 不够** —— 仓库里 `modules/web/dist/` 只有占位 `.gitkeep`，宿主机 `make docker-image` 流程靠 `make web` 在本地预构建 SPA。CI 没有 Makefile 兜底，BuildKit 步骤 `go build` 时 dist 目录是空的，构建出来的镜像访问 `/` 会 404。在 `kind: build` 之前显式加一个 `web-build` step：
+
+```yaml
+steps:
+  - name: clone
+    image: alpine/git:2.45.2
+    commands:
+      - git clone --depth 1 --branch main https://github.com/thepenn/devsys.git .
+  - name: web-build
+    image: node:20-alpine
+    commands:
+      - cd modules/web
+      - npm ci --no-audit --no-fund
+      - npm run build
+  - name: build-and-push-image
+    kind: build
+    certificate: aliyun_docker_registry
+    build:
+      repo: sixx/devsys
+      tags:
+        - latest
+        - build-${CI_PIPELINE_NUMBER}
+```
+
+注意点：
+- `wire_gen.go` 已经 commit 到仓库，CI 端不需要再生成。
+- 跟本地 `make docker-image` 一样的引擎改进（`containerSafeEnv` 剥宿主 TMPDIR、`gitSafeDirectoryEnv` 注入 safe.directory、workspace 默认 `${HOME}/.devsys-workspace`）在这条 pipeline 的 step 容器里也自动生效，不用额外配置。
+- `npm ci` 需要 `modules/web/package-lock.json` 在 git 里。如果 fork 把 lockfile 删了，要么改成 `npm install`（慢一点但能跑），要么把 lockfile 提交回去。
+- `node:20-alpine` 里跑 webpack 峰值 RSS 2-3 GB。控制器 VM 内存紧张时建议跑 pipeline 的宿主有至少 4 GB 空闲，或在 step `env:` 里加 `NODE_OPTIONS=--max-old-space-size=2048` 限上限。
 
 ### Workspace 共享语义
 
