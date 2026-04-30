@@ -44,15 +44,10 @@ func (r *Runtime) Run(ctx context.Context, cfg ContainerConfig, logFn func(strin
 	id := resp.ID
 	defer r.removeContainer(context.Background(), id)
 
-	if err := r.client.ContainerStart(ctx, id, containertypes.StartOptions{}); err != nil {
-		return -1, err
-	}
-
 	attach, err := r.client.ContainerAttach(ctx, id, containertypes.AttachOptions{Stream: true, Stdout: true, Stderr: true})
 	if err != nil {
 		return -1, err
 	}
-	defer attach.Close()
 
 	writer := newLogWriter(logFn)
 	logDone := make(chan error, 1)
@@ -61,6 +56,15 @@ func (r *Runtime) Run(ctx context.Context, cfg ContainerConfig, logFn func(strin
 		writer.Flush()
 		logDone <- err
 	}()
+
+	if err := r.client.ContainerStart(ctx, id, containertypes.StartOptions{}); err != nil {
+		attach.Close()
+		select {
+		case <-logDone:
+		case <-time.After(2 * time.Second):
+		}
+		return -1, err
+	}
 
 	statusCh, errCh := r.client.ContainerWait(ctx, id, containertypes.WaitConditionNotRunning)
 
@@ -86,8 +90,16 @@ func (r *Runtime) Run(ctx context.Context, cfg ContainerConfig, logFn func(strin
 		runErr = ctx.Err()
 	}
 
-	if err := <-logDone; err != nil && runErr == nil {
-		runErr = err
+	attach.Close()
+	select {
+	case err := <-logDone:
+		if err != nil && runErr == nil {
+			runErr = err
+		}
+	case <-time.After(2 * time.Second):
+		if runErr == nil {
+			runErr = errors.New("timed out waiting for container logs")
+		}
 	}
 
 	return exitCode, runErr
@@ -127,31 +139,35 @@ func (r *Runtime) ensureImage(ctx context.Context, image string, logFn func(stri
 }
 
 type ContainerConfig struct {
-	Name       string
-	Image      string
-	Cmd        []string
-	Entrypoint []string
-	Env        []string
-	WorkingDir string
-	Volumes    map[string]struct{}
-	Binds      []string
-	Privileged bool
-	Network    string
+	Name        string
+	Image       string
+	Cmd         []string
+	Entrypoint  []string
+	Env         []string
+	WorkingDir  string
+	Volumes     map[string]struct{}
+	Binds       []string
+	Privileged  bool
+	Network     string
+	SecurityOpt []string
 }
 
 func toDockerConfigs(cfg ContainerConfig) (*containertypes.Config, *containertypes.HostConfig) {
 	config := &containertypes.Config{
-		Image:      cfg.Image,
-		Cmd:        cfg.Cmd,
-		Entrypoint: cfg.Entrypoint,
-		Env:        cfg.Env,
-		WorkingDir: cfg.WorkingDir,
-		Volumes:    cfg.Volumes,
+		Image:        cfg.Image,
+		Cmd:          cfg.Cmd,
+		Entrypoint:   cfg.Entrypoint,
+		Env:          cfg.Env,
+		WorkingDir:   cfg.WorkingDir,
+		Volumes:      cfg.Volumes,
+		AttachStdout: true,
+		AttachStderr: true,
 	}
 	host := &containertypes.HostConfig{
 		Binds:       cfg.Binds,
 		Privileged:  cfg.Privileged,
 		NetworkMode: containertypes.NetworkMode(cfg.Network),
+		SecurityOpt: cfg.SecurityOpt,
 	}
 	return config, host
 }

@@ -49,6 +49,7 @@ const (
 	StepTypeCommands StepType = "commands"
 	StepTypeCache    StepType = "cache"
 	StepTypeApproval StepType = "approval"
+	StepTypeBuild    StepType = "build"
 )
 
 type StepApprovalStrategy string

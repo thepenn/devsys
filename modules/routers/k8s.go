@@ -17,8 +17,8 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/remotecommand"
 
+	"github.com/thepenn/devsys/internal/label"
 	"github.com/thepenn/devsys/model"
-	adminmw "github.com/thepenn/devsys/routers/middleware/admin"
 	authmw "github.com/thepenn/devsys/routers/middleware/auth"
 	"github.com/thepenn/devsys/service"
 )
@@ -40,11 +40,16 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 	ws := register("/admin/k8s")
 	ws.Filter(r.authMW.Authenticate)
 
+	read := []string{label.K8sRead}
+	write := []string{label.K8sWrite}
+
 	ws.Route(ws.GET("/clusters").To(r.listClusters).
 		Doc("List kubernetes clusters").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesClusterSummary{}).
 		Returns(http.StatusOK, "clusters", []model.KubernetesClusterSummary{}))
 
@@ -52,7 +57,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("List namespaces for a cluster").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesNamespace{}).
 		Returns(http.StatusOK, "namespaces", []model.KubernetesNamespace{}))
 
@@ -60,7 +67,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("List resources for a cluster").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]map[string]interface{}{}).
 		Returns(http.StatusOK, "resources", []map[string]interface{}{}))
 
@@ -68,7 +77,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Get single resource").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes(model.KubernetesObjectResponse{}).
 		Returns(http.StatusOK, "resource", model.KubernetesObjectResponse{}))
 
@@ -78,7 +89,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Reads(model.KubernetesManifestRequest{}).
 		Writes(model.KubernetesObjectResponse{}).
 		Returns(http.StatusOK, "resource", model.KubernetesObjectResponse{}))
@@ -88,7 +101,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Reads(model.KubernetesResourceDeleteRequest{}).
 		Returns(http.StatusNoContent, "deleted", nil))
 
@@ -96,7 +111,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Aggregate deployment with related resources").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesObjectResponse{}).
 		Returns(http.StatusOK, "aggregate", []model.KubernetesObjectResponse{}))
 
@@ -104,7 +121,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("List pods for deployment").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesPodSummary{}).
 		Returns(http.StatusOK, "pods", []model.KubernetesPodSummary{}))
 
@@ -112,7 +131,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("List pods for a workload").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesPodRow{}).
 		Returns(http.StatusOK, "pods", []model.KubernetesPodRow{}))
 
@@ -120,7 +141,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Get workload related resources").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes(model.KubernetesWorkloadDetails{}).
 		Returns(http.StatusOK, "details", model.KubernetesWorkloadDetails{}))
 
@@ -128,7 +151,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Get workload history").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes([]model.KubernetesWorkloadHistoryEntry{}).
 		Returns(http.StatusOK, "history", []model.KubernetesWorkloadHistoryEntry{}))
 
@@ -137,7 +162,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Reads(model.KubernetesWorkloadRollbackRequest{}).
 		Returns(http.StatusNoContent, "rolled back", nil))
 
@@ -145,7 +172,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Aggregate logs for workload").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes(model.KubernetesLogResponse{}).
 		Returns(http.StatusOK, "logs", model.KubernetesLogResponse{}))
 
@@ -153,7 +182,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("List events for resource").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes(model.KubernetesEventPage{}).
 		Returns(http.StatusOK, "events", model.KubernetesEventPage{}))
 
@@ -161,7 +192,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Fetch pod logs").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Writes(model.KubernetesLogResponse{}).
 		Returns(http.StatusOK, "logs", model.KubernetesLogResponse{}))
 
@@ -171,7 +204,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Reads(model.KubernetesPodExecRequest{}).
 		Writes(model.KubernetesPodExecResult{}).
 		Returns(http.StatusOK, "output", model.KubernetesPodExecResult{}))
@@ -180,7 +215,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Websocket interactive exec").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Produces(restful.MIME_OCTET).
 		Returns(http.StatusSwitchingProtocols, "stream", nil))
 
@@ -188,7 +225,9 @@ func (r *k8sRouter) router(register func(string) *restful.WebService, tags []str
 		Doc("Stream pod logs via websocket").
 		Filter(r.authMW.RequireAuth).
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleK8s).
 		Produces(restful.MIME_OCTET).
 		Returns(http.StatusSwitchingProtocols, "stream", nil))
 

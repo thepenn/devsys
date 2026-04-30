@@ -1,9 +1,23 @@
 package model
 
+// PipelineOwnerKind 区分 Pipeline 行属于 repo 触发还是独立 Job 触发.
+//   - PipelineOwnerRepo (默认): RepoID > 0, JobID = 0, 走原有 git clone 流程.
+//   - PipelineOwnerJob: RepoID = 0, JobID > 0, 由 PipelineJob.Trigger 创建,
+//     执行器在 RepoClone 为空时跳过 clone 仅准备 workspace.
+const (
+	PipelineOwnerRepo = "repo"
+	PipelineOwnerJob  = "job"
+)
+
 type Pipeline struct {
 	ID                   int64             `json:"id"                      gorm:"column:id;primaryKey;autoIncrement"`
-	RepoID               int64             `json:"-"                       gorm:"column:repo_id;index;uniqueIndex:uq_pipeline_repo_number"`
-	Number               int64             `json:"number"                  gorm:"column:number;uniqueIndex:uq_pipeline_repo_number"`
+	// 旧 uniqueIndex (repo_id, number) 改为 (repo_id, job_id, number) 以容纳
+	// repo_id=0 的 Job 触发场景; CreatePipeline 的 MAX(number) 也会按 owner
+	// 范围分别统计.
+	RepoID               int64             `json:"-"                       gorm:"column:repo_id;index;uniqueIndex:uq_pipeline_owner_number"`
+	JobID                int64             `json:"job_id,omitempty"        gorm:"column:job_id;index;uniqueIndex:uq_pipeline_owner_number;not null;default:0"`
+	OwnerKind            string            `json:"owner_kind,omitempty"    gorm:"column:owner_kind;size:16;not null;default:repo"`
+	Number               int64             `json:"number"                  gorm:"column:number;uniqueIndex:uq_pipeline_owner_number"`
 	Author               string            `json:"author"                  gorm:"column:author;index"`
 	Parent               int64             `json:"parent"                  gorm:"column:parent"`
 	Event                WebhookEvent      `json:"event"                   gorm:"column:event"`
@@ -63,4 +77,12 @@ type PipelineOptions struct {
 	Branch    string            `json:"branch"`
 	Variables map[string]string `json:"variables"`
 	Commit    string            `json:"commit"`
+}
+
+// EffectiveOwnerKind 在 OwnerKind 为空时回落到 repo, 兼容历史数据.
+func (p *Pipeline) EffectiveOwnerKind() string {
+	if p == nil || p.OwnerKind == "" {
+		return PipelineOwnerRepo
+	}
+	return p.OwnerKind
 }

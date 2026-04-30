@@ -1,122 +1,102 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { useRoutes, Navigate } from 'react-router-dom';
-import RequireDeveloper from '../components/RequireDeveloper';
-import RequireAdmin from '../components/RequireAdmin';
+import RequireAuth from '../components/RequireAuth';
+import RequireLabel from '../components/RequireLabel';
 import LoginPage from '../views/login/Login';
-import DevLayout from '../views/dev/DevLayout';
-import DashboardPage from '../views/dev/dashboard/Dashboard';
-import ProfilePage from '../views/dev/profile/Profile';
-import ProjectLayout from '../views/dev/project/ProjectLayout';
-import ProjectPipeline from '../views/dev/project/ProjectPipeline';
-import ProjectRunDetail from '../views/dev/project/ProjectRunDetail';
-import ProjectPlaceholder from '../views/dev/project/ProjectPlaceholder';
-import OpsLayout from '../views/ops/OpsLayout';
-import K8sClusters from '../views/ops/k8s/ClusterList';
-import K8sWorkloads from '../views/ops/k8s/Workloads';
-import K8sServices from '../views/ops/k8s/Services';
-import K8sPods from '../views/ops/k8s/Pods';
-import K8sJobs from '../views/ops/k8s/Jobs';
-import K8sVolumes from '../views/ops/k8s/Volumes';
-import K8sNodes from '../views/ops/k8s/Nodes';
-import K8sMonitor from '../views/ops/k8s/Monitor';
-import ProjectList from '../views/ops/project/ProjectList';
-import ProjectBuild from '../views/ops/project/ProjectBuild';
-import ProjectMonitor from '../views/ops/project/ProjectMonitor';
-import ProjectBuildDetail from '../views/ops/project/ProjectBuildDetail';
-import MessageNotification from '../views/ops/notice/MessageNotification';
-import AlertManagement from '../views/ops/notice/AlertManagement';
-import DatabaseMySQL from '../views/ops/database/DatabaseMySQL';
-import DatabaseRedis from '../views/ops/database/DatabaseRedis';
-import DatabaseMongo from '../views/ops/database/DatabaseMongo';
-import DatabasePostgres from '../views/ops/database/DatabasePostgres';
-import SystemCertificate from '../views/ops/system/Certificate';
-import SystemRoles from '../views/ops/system/Roles';
-import SystemAudit from '../views/ops/system/Audit';
-import SystemProfile from '../views/ops/system/Profile';
-import { useAuth } from '../context/AuthContext';
+import AppLayout from '../views/sidebar/Layout';
+import K8sClusters from '../views/k8s/ClusterList';
+import K8sWorkloads from '../views/k8s/Workloads';
+import K8sServices from '../views/k8s/Services';
+import K8sPods from '../views/k8s/Pods';
+import K8sJobs from '../views/k8s/Jobs';
+import K8sVolumes from '../views/k8s/Volumes';
+import K8sNodes from '../views/k8s/Nodes';
+import K8sMonitor from '../views/k8s/Monitor';
+import ProjectList from '../views/project/ProjectList';
+import ProjectBuild from '../views/project/ProjectBuild';
+import ProjectMonitor from '../views/project/ProjectMonitor';
+import ProjectBuildDetail from '../views/project/ProjectBuildDetail';
+import MessageNotification from '../views/notice/MessageNotification';
+import AlertManagement from '../views/notice/AlertManagement';
+import DatabaseMySQL from '../views/database/DatabaseMySQL';
+import DatabaseRedis from '../views/database/DatabaseRedis';
+import DatabaseMongo from '../views/database/DatabaseMongo';
+import DatabasePostgres from '../views/database/DatabasePostgres';
+import SystemCertificate from '../views/system/Certificate';
+import SystemRoles from '../views/system/Roles';
+import SystemAudit from '../views/system/Audit';
+import SystemProfile from '../views/system/Profile';
+import PipelineTemplateList from '../views/pipelineTemplates/PipelineTemplateList';
+import PipelineTemplateEditor from '../views/pipelineTemplates/PipelineTemplateEditor';
+import PipelineJobList from '../views/pipelineJobs/PipelineJobList';
+import PipelineJobEditor from '../views/pipelineJobs/PipelineJobEditor';
+import PipelineJobRunDetail from '../views/pipelineJobs/PipelineJobRunDetail';
 
-const LandingRedirect = () => {
-  const { isAdmin, loading } = useAuth();
-  
-  if (loading) {
-    return null;
-  }
-  
-  const landingPath = isAdmin ? '/ops/k8s/clusters' : '/dev/dashboard';
-  return <Navigate to={landingPath} replace />;
+// labels 与后端 internal/label/label.go 中的常量一一对应
+const LBL = {
+  K8sRead: 'k8s:read',
+  ProjectRead: 'project:read',
+  MessageRead: 'message:read',
+  AlertRead: 'alert:read',
+  AlertWrite: 'alert:write',
+  DBRead: 'db:read',
+  SystemCertificate: 'system:certificate',
+  SystemRoleWrite: 'system:role_write',
+  SystemAudit: 'system:audit',
+  PipelineTemplateRead: 'pipeline_template:read',
+  PipelineTemplateWrite: 'pipeline_template:write',
+  PipelineJobRead: 'pipeline_job:read',
+  PipelineJobWrite: 'pipeline_job:write',
+  PipelineJobTrigger: 'pipeline_job:trigger'
 };
 
+const guard = (labels, element) => <RequireLabel labels={labels}>{element}</RequireLabel>;
+
 const AppRoutes = () => {
-  const routes = useMemo(
-    () => [
-      { path: '/login', element: <LoginPage /> },
-      {
-        path: '/dev',
-        element: (
-          <RequireDeveloper>
-            <DevLayout />
-          </RequireDeveloper>
-        ),
-        children: [
-          { index: true, element: <Navigate to="dashboard" replace /> },
-          { path: 'dashboard', element: <DashboardPage /> },
-          { path: 'profile', element: <ProfilePage /> },
-          {
-            path: 'projects/:owner/:name',
-            element: <ProjectLayout />,
-            children: [
-              { index: true, element: <Navigate to="pipeline" replace /> },
-              { path: 'pipeline', element: <ProjectPipeline /> },
-              { path: 'pipeline/:runId', element: <ProjectRunDetail /> },
-              { path: 'deployment', element: <ProjectPlaceholder section="deployment" /> },
-              { path: 'monitor', element: <ProjectPlaceholder section="monitor" /> },
-              { path: '*', element: <Navigate to="pipeline" replace /> }
-            ]
-          }
-        ]
-      },
-      {
-        path: '/ops',
-        element: (
-          <RequireAdmin>
-            <OpsLayout />
-          </RequireAdmin>
-        ),
-        children: [
-          { index: true, element: <Navigate to="k8s/clusters" replace /> },
-          { path: 'k8s/clusters', element: <K8sClusters /> },
-          { path: 'k8s/workloads', element: <K8sWorkloads /> },
-          { path: 'k8s/services', element: <K8sServices /> },
-          { path: 'k8s/pods', element: <K8sPods /> },
-          { path: 'k8s/jobs', element: <K8sJobs /> },
-          { path: 'k8s/volumes', element: <K8sVolumes /> },
-          { path: 'k8s/nodes', element: <K8sNodes /> },
-          { path: 'k8s/monitor', element: <K8sMonitor /> },
-          { path: 'profile', element: <SystemProfile /> },
-          { path: 'projects/list', element: <ProjectList /> },
-          { path: 'projects/pipeline', element: <ProjectBuild /> },
-          { path: 'projects/build/:repoId/:runId', element: <ProjectBuildDetail /> },
-          { path: 'projects/monitor', element: <ProjectMonitor /> },
-          { path: 'messages/notification', element: <MessageNotification /> },
-          { path: 'messages/alert', element: <AlertManagement /> },
-          { path: 'db/mysql', element: <DatabaseMySQL /> },
-          { path: 'db/redis', element: <DatabaseRedis /> },
-          { path: 'db/mongo', element: <DatabaseMongo /> },
-          { path: 'db/postgres', element: <DatabasePostgres /> },
-          { path: 'system/credentials', element: <SystemCertificate /> },
-          { path: 'system/roles', element: <SystemRoles /> },
-          { path: 'system/audit', element: <SystemAudit /> }
-        ]
-      },
-      { path: '/', element: <LandingRedirect /> },
-      { path: '*', element: <Navigate to="/login" replace /> }
-    ],
-    []
-  );
-
-  const element = useRoutes(routes);
-
-  return element;
+  return useRoutes([
+    { path: '/login', element: <LoginPage /> },
+    { path: '/dev/*', element: <Navigate to="/ops" replace /> },
+    {
+      path: '/ops',
+      element: (
+        <RequireAuth>
+          <AppLayout />
+        </RequireAuth>
+      ),
+      children: [
+        { index: true, element: <Navigate to="k8s/clusters" replace /> },
+        { path: 'k8s/clusters', element: guard([LBL.K8sRead], <K8sClusters />) },
+        { path: 'k8s/workloads', element: guard([LBL.K8sRead], <K8sWorkloads />) },
+        { path: 'k8s/services', element: guard([LBL.K8sRead], <K8sServices />) },
+        { path: 'k8s/pods', element: guard([LBL.K8sRead], <K8sPods />) },
+        { path: 'k8s/jobs', element: guard([LBL.K8sRead], <K8sJobs />) },
+        { path: 'k8s/volumes', element: guard([LBL.K8sRead], <K8sVolumes />) },
+        { path: 'k8s/nodes', element: guard([LBL.K8sRead], <K8sNodes />) },
+        { path: 'k8s/monitor', element: guard([LBL.K8sRead], <K8sMonitor />) },
+        { path: 'profile', element: <SystemProfile /> },
+        { path: 'projects/list', element: guard([LBL.ProjectRead], <ProjectList />) },
+        { path: 'projects/pipeline', element: guard([LBL.ProjectRead], <ProjectBuild />) },
+        { path: 'projects/build/:repoId/:runId', element: guard([LBL.ProjectRead], <ProjectBuildDetail />) },
+        { path: 'projects/monitor', element: guard([LBL.ProjectRead], <ProjectMonitor />) },
+        { path: 'pipeline-templates', element: guard([LBL.PipelineTemplateRead], <PipelineTemplateList />) },
+        { path: 'pipeline-templates/:id', element: guard([LBL.PipelineTemplateRead], <PipelineTemplateEditor />) },
+        { path: 'pipeline-jobs', element: guard([LBL.PipelineJobRead], <PipelineJobList />) },
+        { path: 'pipeline-jobs/:id', element: guard([LBL.PipelineJobRead], <PipelineJobEditor />) },
+        { path: 'pipeline-jobs/:id/runs/:runId', element: guard([LBL.PipelineJobRead], <PipelineJobRunDetail />) },
+        { path: 'messages/notification', element: guard([LBL.MessageRead], <MessageNotification />) },
+        { path: 'messages/alert', element: guard([LBL.AlertRead, LBL.AlertWrite], <AlertManagement />) },
+        { path: 'db/mysql', element: guard([LBL.DBRead], <DatabaseMySQL />) },
+        { path: 'db/redis', element: guard([LBL.DBRead], <DatabaseRedis />) },
+        { path: 'db/mongo', element: guard([LBL.DBRead], <DatabaseMongo />) },
+        { path: 'db/postgres', element: guard([LBL.DBRead], <DatabasePostgres />) },
+        { path: 'system/credentials', element: guard([LBL.SystemCertificate], <SystemCertificate />) },
+        { path: 'system/roles', element: guard([LBL.SystemRoleWrite], <SystemRoles />) },
+        { path: 'system/audit', element: guard([LBL.SystemAudit], <SystemAudit />) }
+      ]
+    },
+    { path: '/', element: <Navigate to="/ops" replace /> },
+    { path: '*', element: <Navigate to="/" replace /> }
+  ]);
 };
 
 export default AppRoutes;

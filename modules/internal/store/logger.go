@@ -10,9 +10,8 @@ import (
 )
 
 type gormLogger struct {
-	logger  zerolog.Logger
-	level   logger.LogLevel
-	showSQL bool
+	logger zerolog.Logger
+	level  logger.LogLevel
 }
 
 func newGORMLogger(level logger.LogLevel) *gormLogger {

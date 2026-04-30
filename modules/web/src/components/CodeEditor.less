@@ -1,0 +1,63 @@
+// Shared 自研 textarea 高亮编辑器样式. 与 project.less 中的旧定义保持
+// 一致, 这样从 project 页面迁出后视觉无差.
+.code-editor {
+  position: relative;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  height: clamp(480px, 65vh, 720px);
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000000;
+  color: #e2e8f0;
+}
+
+.code-editor--compact {
+  height: clamp(280px, 40vh, 480px);
+}
+
+.code-editor__highlight,
+.code-editor__textarea {
+  position: absolute;
+  inset: 0;
+  padding: 18px 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: auto;
+  background: #000000;
+}
+
+.code-editor__highlight {
+  pointer-events: none;
+  user-select: none;
+}
+
+.code-editor__textarea {
+  background: transparent;
+  color: transparent;
+  caret-color: #7dd3fc;
+  border: none;
+  resize: none;
+}
+
+.code-editor__textarea:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.code-key {
+  color: #93c5fd;
+}
+
+.code-value {
+  color: #facc15;
+}
+
+.code-comment {
+  color: #94a3b8;
+}
+
+.code-keyword {
+  color: #fda4af;
+  font-weight: 600;
+}

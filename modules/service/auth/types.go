@@ -13,13 +13,15 @@ type AuthResponse struct {
 }
 
 type UserInfo struct {
-	ID       int64  `json:"id"`
-	Login    string `json:"login"`
-	Email    string `json:"email"`
-	Avatar   string `json:"avatar_url"`
-	ForgeID  int64  `json:"forge_id"`
-	Admin    bool   `json:"admin"`
-	Provider string `json:"provider"`
+	ID       int64    `json:"id"`
+	Login    string   `json:"login"`
+	Email    string   `json:"email"`
+	Avatar   string   `json:"avatar_url"`
+	ForgeID  int64    `json:"forge_id"`
+	Admin    bool     `json:"admin"`
+	Provider string   `json:"provider"`
+	Roles    []string `json:"roles"`
+	Labels   []string `json:"labels"`
 }
 
 type SessionClaims struct {
@@ -37,5 +39,7 @@ func toUserInfo(user *model.User, provider string) UserInfo {
 		ForgeID:  user.ForgeID,
 		Admin:    user.Admin,
 		Provider: provider,
+		Roles:    []string{},
+		Labels:   []string{},
 	}
 }

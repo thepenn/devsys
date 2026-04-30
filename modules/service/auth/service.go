@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2"
 	githuboauth "golang.org/x/oauth2/github"
 
+	internalauth "github.com/thepenn/devsys/internal/auth"
 	"github.com/thepenn/devsys/internal/config"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/model"
@@ -44,11 +45,13 @@ type Service struct {
 	db    *store.DB
 	users *user.Service
 	repos *repo.Service
+	rbac  *internalauth.RBAC
 
 	provider   string
 	authProv   gitAuthProvider
 	sessionKey []byte
 	tokenTTL   time.Duration
+	stateTTL   time.Duration
 	scopes     []string
 	httpClient *http.Client
 
@@ -76,6 +79,7 @@ type giteeUser struct {
 	Name      string `json:"name"`
 	Email     string `json:"email"`
 	AvatarURL string `json:"avatar_url"`
+	SiteAdmin bool   `json:"site_admin"`
 }
 
 type giteeRepo struct {
@@ -141,7 +145,7 @@ type githubRepo struct {
 	Archived      bool            `json:"archived"`
 }
 
-func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Service) (*Service, error) {
+func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Service, rbac *internalauth.RBAC) (*Service, error) {
 	secret := strings.TrimSpace(cfg.Auth.SessionSecret)
 	if secret == "" {
 		generated, err := randomState()
@@ -219,9 +223,11 @@ func New(cfg *config.Config, db *store.DB, users *user.Service, repos *repo.Serv
 		db:         db,
 		users:      users,
 		repos:      repos,
+		rbac:       rbac,
 		provider:   provider,
 		sessionKey: []byte(secret),
 		tokenTTL:   cfg.Auth.TokenTTL,
+		stateTTL:   cfg.Auth.StateTTL,
 		scopes:     scopes,
 		httpClient: httpClient,
 
@@ -299,8 +305,36 @@ func (s *Service) CurrentUser(ctx context.Context, userID int64) (*UserInfo, err
 	if userModel == nil {
 		return nil, nil
 	}
-	info := toUserInfo(userModel, s.provider)
+	info, err := s.buildUserInfo(ctx, userModel)
+	if err != nil {
+		return nil, err
+	}
 	return &info, nil
+}
+
+// buildUserInfo enriches a UserInfo with the user's roles and the gorbac
+// effective label set. Used by both /me and OAuth login responses so the
+// frontend can render the menu immediately after redirect.
+func (s *Service) buildUserInfo(ctx context.Context, userModel *model.User) (UserInfo, error) {
+	info := toUserInfo(userModel, s.provider)
+	if s.users == nil {
+		return info, nil
+	}
+	roles, err := s.users.RoleNames(ctx, userModel.ID)
+	if err != nil {
+		return info, err
+	}
+	if roles == nil {
+		roles = []string{}
+	}
+	info.Roles = roles
+	if s.rbac != nil {
+		info.Labels = s.rbac.EffectiveLabels(roles)
+	}
+	if info.Labels == nil {
+		info.Labels = []string{}
+	}
+	return info, nil
 }
 
 func (s *Service) beginGitLabAuth(ctx context.Context, redirect string) (string, string, error) {
@@ -381,9 +415,13 @@ func (s *Service) completeGitLabAuth(ctx context.Context, code, state string) (*
 		return nil, err
 	}
 
+	info, err := s.buildUserInfo(ctx, appUser)
+	if err != nil {
+		return nil, err
+	}
 	return &AuthResponse{
 		Token:    jwtToken,
-		User:     toUserInfo(appUser, providerGitLab),
+		User:     info,
 		Redirect: redirect,
 	}, nil
 }
@@ -564,9 +602,13 @@ func (s *Service) completeGitHubAuth(ctx context.Context, code, state string) (*
 		return nil, err
 	}
 
+	info, err := s.buildUserInfo(ctx, appUser)
+	if err != nil {
+		return nil, err
+	}
 	return &AuthResponse{
 		Token:    jwtToken,
-		User:     toUserInfo(appUser, providerGitHub),
+		User:     info,
 		Redirect: redirect,
 	}, nil
 }
@@ -744,6 +786,7 @@ func (s *Service) completeGiteeAuth(ctx context.Context, code, state string) (*A
 		Login:    firstNonEmpty(userInfo.Login, userInfo.Name),
 		Email:    userInfo.Email,
 		Avatar:   userInfo.AvatarURL,
+		IsAdmin:  userInfo.SiteAdmin,
 	}, token)
 	if err != nil {
 		return nil, err
@@ -762,9 +805,13 @@ func (s *Service) completeGiteeAuth(ctx context.Context, code, state string) (*A
 		return nil, err
 	}
 
+	info, err := s.buildUserInfo(ctx, appUser)
+	if err != nil {
+		return nil, err
+	}
 	return &AuthResponse{
 		Token:    jwtToken,
-		User:     toUserInfo(appUser, providerGitee),
+		User:     info,
 		Redirect: redirect,
 	}, nil
 }
@@ -906,9 +953,13 @@ func (s *Service) completeGiteaAuth(ctx context.Context, code, state string) (*A
 		return nil, err
 	}
 
+	info, err := s.buildUserInfo(ctx, appUser)
+	if err != nil {
+		return nil, err
+	}
 	return &AuthResponse{
 		Token:    jwtToken,
-		User:     toUserInfo(appUser, providerGitea),
+		User:     info,
 		Redirect: redirect,
 	}, nil
 }
@@ -1584,15 +1635,18 @@ func (s *Service) generateToken(user *model.User) (string, error) {
 func (s *Service) encodeState(state, redirect string) (string, error) {
 	stateBytes := []byte(state)
 	redirectBytes := []byte(redirect)
+	tsBytes := []byte(strconv.FormatInt(time.Now().Unix(), 10))
 
 	mac := hmac.New(sha256.New, s.sessionKey)
 	mac.Write(stateBytes)
 	mac.Write(redirectBytes)
+	mac.Write(tsBytes)
 	sum := mac.Sum(nil)
 
 	encoded := strings.Join([]string{
 		base64.RawURLEncoding.EncodeToString(stateBytes),
 		base64.RawURLEncoding.EncodeToString(redirectBytes),
+		base64.RawURLEncoding.EncodeToString(tsBytes),
 		base64.RawURLEncoding.EncodeToString(sum),
 	}, ".")
 
@@ -1601,7 +1655,7 @@ func (s *Service) encodeState(state, redirect string) (string, error) {
 
 func (s *Service) decodeState(encoded string) (string, string, error) {
 	parts := strings.Split(encoded, ".")
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		log.Warn().Str("state", encoded).Msg("oauth state malformed")
 		return "", "", errors.New("invalid oauth state")
 	}
@@ -1614,7 +1668,11 @@ func (s *Service) decodeState(encoded string) (string, string, error) {
 	if err != nil {
 		return "", "", errors.New("invalid oauth state")
 	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	tsBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", "", errors.New("invalid oauth state")
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[3])
 	if err != nil {
 		return "", "", errors.New("invalid oauth state")
 	}
@@ -1622,11 +1680,22 @@ func (s *Service) decodeState(encoded string) (string, string, error) {
 	mac := hmac.New(sha256.New, s.sessionKey)
 	mac.Write(stateBytes)
 	mac.Write(redirectBytes)
+	mac.Write(tsBytes)
 	expected := mac.Sum(nil)
 
 	if !hmac.Equal(signature, expected) {
 		log.Warn().Str("state", encoded).Msg("oauth state signature mismatch")
 		return "", "", errors.New("invalid oauth state")
+	}
+
+	if s.stateTTL > 0 {
+		ts, err := strconv.ParseInt(string(tsBytes), 10, 64)
+		if err != nil {
+			return "", "", errors.New("invalid oauth state timestamp")
+		}
+		if time.Since(time.Unix(ts, 0)) > s.stateTTL {
+			return "", "", errors.New("oauth state expired")
+		}
 	}
 
 	return string(stateBytes), string(redirectBytes), nil

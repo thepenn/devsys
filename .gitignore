@@ -1,5 +1,31 @@
+# =============================================================================
+# 项目根级 .gitignore
+# 只放整库通用的 ignore (OS / 编辑器 / 日志). 子目录的语言特定规则放各自的
+# .gitignore (modules/.gitignore = Go, modules/web/.gitignore = Node).
+# =============================================================================
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
 # IDE
 .idea/
 .vscode/
 *.iml
+*.swp
+*.swo
+*~
 
+# 日志
+*.log
+
+# Cursor / Codex 等 AI 工具的本地工作区缓存 (通常在 ~ 目录, 这里兜底).
+.cursor/cache/
+.cursor/projects/
+
+# 本地 secrets 兜底 (子项目里也可单独 ignore)
+.env
+.env.local
+.env.*.local

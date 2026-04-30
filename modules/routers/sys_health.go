@@ -1,6 +1,7 @@
 package routers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/thepenn/devsys/routers/middleware/metrics"
+	"github.com/thepenn/devsys/service"
 )
 
 var (
@@ -41,6 +43,14 @@ var (
 
 type health struct {
 	startTime time.Time
+	services  *service.Services
+}
+
+func newHealth(services *service.Services) *health {
+	return &health{
+		startTime: time.Now(),
+		services:  services,
+	}
 }
 
 func (h *health) router(register func(path string) *restful.WebService, tags []string) []*restful.WebService {
@@ -73,21 +83,37 @@ func (h *health) ping(req *restful.Request, resp *restful.Response) {
 }
 
 func (h *health) healthy(req *restful.Request, resp *restful.Response) {
-	healthStatus.Set(1)
+	status := "healthy"
+	httpStatus := http.StatusOK
+
+	if h.services != nil && h.services.DB != nil {
+		sqlDB, err := h.services.DB.GetDB().DB()
+		if err != nil || sqlDB.PingContext(req.Request.Context()) != nil {
+			status = "unhealthy"
+			httpStatus = http.StatusServiceUnavailable
+		}
+	}
+
+	if httpStatus == http.StatusOK {
+		healthStatus.Set(1)
+	} else {
+		healthStatus.Set(0)
+	}
 
 	data := map[string]interface{}{
-		"status":    "healthy",
+		"status":    status,
 		"uptime":    time.Since(h.startTime).String(),
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
-	httpRequestsTotal.WithLabelValues("GET", "/health", "200").Inc()
+	statusStr := fmt.Sprintf("%d", httpStatus)
+	httpRequestsTotal.WithLabelValues("GET", "/health", statusStr).Inc()
 	startTime, ok := metrics.StartTimeFromContext(req.Request.Context())
 	if ok {
 		httpRequestDuration.WithLabelValues("GET", "/health").Observe(time.Since(startTime).Seconds())
 	}
 
-	_ = resp.WriteHeaderAndEntity(http.StatusOK, data)
+	_ = resp.WriteHeaderAndEntity(httpStatus, data)
 }
 
 func (h *health) metrics(req *restful.Request, resp *restful.Response) {

@@ -23,7 +23,7 @@ type Config struct {
 }
 
 type Database struct {
-	Driver         string `envconfig:"DATABASE_DRIVER"          default:"mysql"`
+	Driver         string `envconfig:"DATABASE_DRIVER"          default:"mysql"` // currently only "mysql" is supported
 	Datasource     string `envconfig:"DATABASE_DATASOURCE"      default:"root:password@tcp(localhost:3306)/devops?charset=utf8mb4&parseTime=True&loc=Local"`
 	MaxConnections int    `envconfig:"DATABASE_MAX_CONNECTIONS" default:"10"`
 	ShowSql        bool   `envconfig:"DATABASE_SHOW_SQL"        default:"false"`

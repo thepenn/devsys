@@ -10,16 +10,14 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"gorm.io/gorm"
 
+	"github.com/thepenn/devsys/internal/label"
 	"github.com/thepenn/devsys/model"
-	adminmw "github.com/thepenn/devsys/routers/middleware/admin"
 	authmw "github.com/thepenn/devsys/routers/middleware/auth"
 	"github.com/thepenn/devsys/service"
 )
 
 var (
 	errSystemServiceUnavailable = errors.New("system service unavailable")
-	errUserServiceUnavailable   = errors.New("user service unavailable")
-	errAdminOnly                = errors.New("admin privileges required")
 	errInvalidCertificateID     = errors.New("certificate id is invalid")
 )
 
@@ -68,10 +66,14 @@ func (r *systemRouter) registerCertificateRoutes(register func(path string) *res
 	ws.Produces(restful.MIME_JSON)
 	ws.Filter(r.authMW.RequireAuth)
 
+	certLabels := []string{label.SystemCertificate}
+
 	ws.Route(ws.GET("").To(r.listCertificates).
 		Doc("列出凭证").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, certLabels).
+		Metadata(label.MetaModule, label.ModuleSystem).
 		Writes(certificateListResponse{}).
 		Returns(http.StatusOK, "OK", certificateListResponse{}).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -81,7 +83,9 @@ func (r *systemRouter) registerCertificateRoutes(register func(path string) *res
 	ws.Route(ws.POST("").To(r.createCertificate).
 		Doc("创建凭证").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, certLabels).
+		Metadata(label.MetaModule, label.ModuleSystem).
 		Reads(certificateCreateRequest{}).
 		Writes(certificateResponse{}).
 		Returns(http.StatusCreated, "created", certificateResponse{}).
@@ -93,7 +97,9 @@ func (r *systemRouter) registerCertificateRoutes(register func(path string) *res
 	ws.Route(ws.GET("/{id}").To(r.getCertificate).
 		Doc("获取凭证详情").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, certLabels).
+		Metadata(label.MetaModule, label.ModuleSystem).
 		Writes(certificateResponse{}).
 		Returns(http.StatusOK, "OK", certificateResponse{}).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -104,7 +110,9 @@ func (r *systemRouter) registerCertificateRoutes(register func(path string) *res
 	ws.Route(ws.PUT("/{id}").To(r.updateCertificate).
 		Doc("更新凭证").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, certLabels).
+		Metadata(label.MetaModule, label.ModuleSystem).
 		Reads(certificateUpdateRequest{}).
 		Writes(certificateResponse{}).
 		Returns(http.StatusOK, "OK", certificateResponse{}).
@@ -117,7 +125,9 @@ func (r *systemRouter) registerCertificateRoutes(register func(path string) *res
 	ws.Route(ws.DELETE("/{id}").To(r.deleteCertificate).
 		Doc("删除凭证").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
-		Metadata(adminmw.AdminEnable, true).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, certLabels).
+		Metadata(label.MetaModule, label.ModuleSystem).
 		Returns(http.StatusNoContent, "deleted", nil).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
 		Returns(http.StatusForbidden, "forbidden", errorResponse{}).
@@ -141,11 +151,6 @@ func (r *systemRouter) getPublicKey(req *restful.Request, resp *restful.Response
 }
 
 func (r *systemRouter) listCertificates(req *restful.Request, resp *restful.Response) {
-	if err := r.ensureAdmin(req); err != nil {
-		r.writeAuthError(resp, err)
-		return
-	}
-
 	page, _ := strconv.Atoi(req.QueryParameter("page"))
 	perPage, _ := strconv.Atoi(req.QueryParameter("per_page"))
 	if page <= 0 {
@@ -187,11 +192,6 @@ func (r *systemRouter) listCertificates(req *restful.Request, resp *restful.Resp
 }
 
 func (r *systemRouter) createCertificate(req *restful.Request, resp *restful.Response) {
-	if err := r.ensureAdmin(req); err != nil {
-		r.writeAuthError(resp, err)
-		return
-	}
-
 	var body certificateCreateRequest
 	if err := req.ReadEntity(&body); err != nil {
 		writeError(resp, http.StatusBadRequest, err)
@@ -218,11 +218,6 @@ func (r *systemRouter) createCertificate(req *restful.Request, resp *restful.Res
 }
 
 func (r *systemRouter) getCertificate(req *restful.Request, resp *restful.Response) {
-	if err := r.ensureAdmin(req); err != nil {
-		r.writeAuthError(resp, err)
-		return
-	}
-
 	id, err := r.certificateID(req)
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
@@ -251,11 +246,6 @@ func (r *systemRouter) getCertificate(req *restful.Request, resp *restful.Respon
 }
 
 func (r *systemRouter) updateCertificate(req *restful.Request, resp *restful.Response) {
-	if err := r.ensureAdmin(req); err != nil {
-		r.writeAuthError(resp, err)
-		return
-	}
-
 	id, err := r.certificateID(req)
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
@@ -302,11 +292,6 @@ func (r *systemRouter) updateCertificate(req *restful.Request, resp *restful.Res
 }
 
 func (r *systemRouter) deleteCertificate(req *restful.Request, resp *restful.Response) {
-	if err := r.ensureAdmin(req); err != nil {
-		r.writeAuthError(resp, err)
-		return
-	}
-
 	id, err := r.certificateID(req)
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
@@ -324,42 +309,6 @@ func (r *systemRouter) deleteCertificate(req *restful.Request, resp *restful.Res
 	}
 
 	resp.WriteHeader(http.StatusNoContent)
-}
-
-func (r *systemRouter) ensureAdmin(req *restful.Request) error {
-	if r.services == nil || r.services.User == nil {
-		return errUserServiceUnavailable
-	}
-
-	claims, ok := authmw.FromContext(req.Request.Context())
-	if !ok {
-		return errors.New("unauthorized")
-	}
-
-	user, err := r.services.User.FindByID(req.Request.Context(), claims.UserID)
-	if err != nil {
-		return err
-	}
-	if user == nil {
-		return errors.New("user not found")
-	}
-	if !user.Admin {
-		return errAdminOnly
-	}
-	return nil
-}
-
-func (r *systemRouter) writeAuthError(resp *restful.Response, err error) {
-	switch {
-	case errors.Is(err, errAdminOnly):
-		writeError(resp, http.StatusForbidden, err)
-	case strings.Contains(strings.ToLower(err.Error()), "unauthorized"):
-		writeError(resp, http.StatusUnauthorized, err)
-	case strings.Contains(strings.ToLower(err.Error()), "user not found"):
-		writeError(resp, http.StatusUnauthorized, err)
-	default:
-		writeError(resp, http.StatusInternalServerError, err)
-	}
 }
 
 func (r *systemRouter) certificateID(req *restful.Request) (int64, error) {

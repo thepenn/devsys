@@ -19,6 +19,10 @@ func (a *App) Close() error {
 	if a.Services != nil && a.Services.Pipeline != nil {
 		a.Services.Pipeline.Shutdown()
 	}
+	if a.Services != nil && a.Services.Audit != nil {
+		// Drain pending audit entries before closing the DB connection.
+		a.Services.Audit.Stop()
+	}
 	if a.Cache != nil {
 		a.Cache.Close()
 	}

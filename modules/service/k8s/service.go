@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -962,12 +963,24 @@ func (s *Service) WorkloadHistory(ctx context.Context, clusterID int64, kind, na
 			return nil, err
 		}
 		return deploymentHistoryEntries(ctx, client, dep)
+	case "statefulset":
+		sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return controllerRevisionHistory(ctx, client, namespace, sts.UID)
+	case "daemonset":
+		ds, err := client.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return controllerRevisionHistory(ctx, client, namespace, ds.UID)
 	default:
 		return nil, fmt.Errorf("history for %s not supported", kind)
 	}
 }
 
-// RollbackWorkload rolls workload back to a previous revision (deployment only).
+// RollbackWorkload rolls workload back to a previous revision.
 func (s *Service) RollbackWorkload(ctx context.Context, clusterID int64, kind, namespace, name string, revision int64) error {
 	if revision <= 0 {
 		return fmt.Errorf("revision must be greater than zero")
@@ -994,8 +1007,28 @@ func (s *Service) RollbackWorkload(ctx context.Context, clusterID int64, kind, n
 		dep.Spec.Template.Annotations["devsys.dev/rollback-revision"] = fmt.Sprintf("%d", revision)
 		_, err = client.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 		return err
+	case "statefulset":
+		sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		return rollbackViaControllerRevision(ctx, client, namespace, sts.UID, revision, func(template *corev1.PodTemplateSpec) error {
+			sts.Spec.Template = *template
+			_, err := client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
+			return err
+		})
+	case "daemonset":
+		ds, err := client.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		return rollbackViaControllerRevision(ctx, client, namespace, ds.UID, revision, func(template *corev1.PodTemplateSpec) error {
+			ds.Spec.Template = *template
+			_, err := client.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
+			return err
+		})
 	default:
-		return fmt.Errorf("rollback for %s not implemented", kind)
+		return fmt.Errorf("rollback for %s not supported", kind)
 	}
 }
 
@@ -1112,6 +1145,86 @@ func findDeploymentReplicaSetByRevision(ctx context.Context, client kubernetes.I
 		}
 	}
 	return nil, fmt.Errorf("revision %d not found", revision)
+}
+
+func controllerRevisionHistory(ctx context.Context, client kubernetes.Interface, namespace string, ownerUID types.UID) ([]model.KubernetesWorkloadHistoryEntry, error) {
+	crList, err := client.AppsV1().ControllerRevisions(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var entries []model.KubernetesWorkloadHistoryEntry
+	for _, cr := range crList.Items {
+		if !ownedBy(cr.OwnerReferences, ownerUID) {
+			continue
+		}
+		var images []string
+		if template, err := extractPodTemplateFromRevision(&cr); err == nil && template != nil {
+			images = collectTemplateImages(template)
+		}
+		entries = append(entries, model.KubernetesWorkloadHistoryEntry{
+			Revision:  cr.Revision,
+			Images:    images,
+			CreatedAt: cr.CreationTimestamp.Unix(),
+			Source:    cr.Name,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Revision > entries[j].Revision
+	})
+	return entries, nil
+}
+
+func rollbackViaControllerRevision(ctx context.Context, client kubernetes.Interface, namespace string, ownerUID types.UID, revision int64, applyTemplate func(*corev1.PodTemplateSpec) error) error {
+	crList, err := client.AppsV1().ControllerRevisions(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, cr := range crList.Items {
+		if !ownedBy(cr.OwnerReferences, ownerUID) {
+			continue
+		}
+		if cr.Revision == revision {
+			template, err := extractPodTemplateFromRevision(&cr)
+			if err != nil {
+				return fmt.Errorf("failed to extract pod template from revision %d: %w", revision, err)
+			}
+			return applyTemplate(template)
+		}
+	}
+	return fmt.Errorf("revision %d not found", revision)
+}
+
+func extractPodTemplateFromRevision(cr *appsv1.ControllerRevision) (*corev1.PodTemplateSpec, error) {
+	if cr.Data.Raw == nil {
+		return nil, fmt.Errorf("controller revision has no data")
+	}
+
+	obj, err := runtime.Decode(scheme.Codecs.UniversalDeserializer(), cr.Data.Raw)
+	if err != nil {
+		var raw map[string]interface{}
+		if jsonErr := json.Unmarshal(cr.Data.Raw, &raw); jsonErr != nil {
+			return nil, err
+		}
+		if spec, ok := raw["spec"].(map[string]interface{}); ok {
+			if tmpl, ok := spec["template"].(map[string]interface{}); ok {
+				templateBytes, _ := json.Marshal(tmpl)
+				var template corev1.PodTemplateSpec
+				if err := json.Unmarshal(templateBytes, &template); err == nil {
+					return &template, nil
+				}
+			}
+		}
+		return nil, err
+	}
+
+	switch typed := obj.(type) {
+	case *appsv1.StatefulSet:
+		return &typed.Spec.Template, nil
+	case *appsv1.DaemonSet:
+		return &typed.Spec.Template, nil
+	default:
+		return nil, fmt.Errorf("unexpected type %T in controller revision", obj)
+	}
 }
 
 func ownedBy(refs []metav1.OwnerReference, uid types.UID) bool {

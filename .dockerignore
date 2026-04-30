@@ -1,0 +1,35 @@
+# 版本控制 / IDE
+.git
+.gitignore
+.cursor
+.vscode
+.idea
+
+# 前端构建产物 / 缓存
+**/node_modules
+**/dist
+# modules/web/dist 是 Go 通过 //go:embed all:dist 嵌入二进制的 SPA 产物,
+# Makefile 的 docker-image 入口会先 make web 把它刷新好再 docker build,
+# 这里必须放行 (上面的 **/dist 默认会把它一并 ignore 掉).
+!modules/web/dist
+!modules/web/dist/**
+**/.cache
+**/.next
+**/coverage
+modules/web/.eslintcache
+
+# 日志 / 临时文件
+**/*.log
+**/.DS_Store
+**/Thumbs.db
+
+# 不要把宿主 .env 带进去, Docker 镜像里靠 -e / --env-file 注入
+**/.env
+**/.env.local
+**/.env.*.local
+
+# 计划 / 文档不参与镜像构建
+docs
+*.md
+!README.md
+.cursorignore

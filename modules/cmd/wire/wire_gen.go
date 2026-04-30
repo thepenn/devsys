@@ -11,10 +11,12 @@ import (
 	"github.com/thepenn/devsys/internal/cache"
 	"github.com/thepenn/devsys/internal/config"
 	"github.com/thepenn/devsys/internal/handler"
+	"github.com/thepenn/devsys/internal/router"
 	"github.com/thepenn/devsys/internal/server"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/routers"
-	"github.com/thepenn/devsys/routers/middleware/admin"
+	"github.com/thepenn/devsys/routers/middleware/acl"
+	"github.com/thepenn/devsys/routers/middleware/audit"
 	"github.com/thepenn/devsys/routers/middleware/auth"
 	"github.com/thepenn/devsys/routers/middleware/cors"
 	"github.com/thepenn/devsys/routers/middleware/metrics"
@@ -40,9 +42,11 @@ func WireApp(cfg *config.Config) (*App, error) {
 	}
 	authMiddleware := InjectedAuthMiddleware(services)
 	routers := InjectedRouters(cfg, services, authMiddleware)
-	adminMiddleware := InjectedAdminMiddleware(services)
+	aclMiddleware := InjectedACLMiddleware(services)
+	auditMiddleware := InjectedAuditMiddleware(services)
 	metricsMiddleware := InjectedMetricsMiddleware()
-	handler := InjectedHandler(cfg, routers, authMiddleware, adminMiddleware, metricsMiddleware)
+	sync := InjectedRouterSync(db)
+	handler := InjectedHandler(cfg, routers, authMiddleware, aclMiddleware, auditMiddleware, metricsMiddleware, sync)
 	httpServer := InjectedHttpServer(cfg, middleware, handler)
 	app := NewApp(httpServer, services, db, cache)
 	return app, nil
@@ -77,8 +81,10 @@ var appSet = wire.NewSet(
 	InjectedServices,
 	InjectedMetricsMiddleware,
 	InjectedCorsMiddleware,
-	InjectedAdminMiddleware,
 	InjectedAuthMiddleware,
+	InjectedACLMiddleware,
+	InjectedAuditMiddleware,
+	InjectedRouterSync,
 	NewApp,
 )
 
@@ -86,8 +92,15 @@ func InjectedRouters(cfg *config.Config, services *service.Services, authMiddlew
 	return routers.NewRouters(cfg, services, authMiddleware)
 }
 
-func InjectedHandler(cfg *config.Config, routers2 *routers.Routers, authMiddleware *auth.Middleware, adminMiddleware *admin.Middleware, metric *metrics.Middleware) *handler.Handler {
-	return handler.NewHandler(handler.WithConfig(cfg.Server.Host, cfg.Server.RootPath), handler.WithRegisterControllers(routers2), handler.WithRegisterMiddlewares(authMiddleware), handler.WithRegisterMiddlewares(adminMiddleware), handler.WithRegisterMiddlewares(metric))
+func InjectedHandler(
+	cfg *config.Config, routers2 *routers.Routers,
+	authMiddleware *auth.Middleware,
+	aclMiddleware *acl.Middleware,
+	auditMiddleware *audit.Middleware,
+	metric *metrics.Middleware,
+	routerSync *router.Sync,
+) *handler.Handler {
+	return handler.NewHandler(handler.WithConfig(cfg.Server.Host, cfg.Server.RootPath), handler.WithRegisterControllers(routers2), handler.WithRegisterMiddlewares(authMiddleware), handler.WithRegisterMiddlewares(aclMiddleware), handler.WithRegisterMiddlewares(auditMiddleware), handler.WithRegisterMiddlewares(metric), handler.WithStorageRouter(routerSync))
 }
 
 func InjectedHttpServer(cfg *config.Config, corsMiddleware *cors.Middleware, h *handler.Handler) *server.HttpServer {
@@ -95,7 +108,7 @@ func InjectedHttpServer(cfg *config.Config, corsMiddleware *cors.Middleware, h *
 }
 
 func InjectedDatabase(cfg *config.Config) (*store.DB, error) {
-	db, err := store.Connect(cfg.Database.Datasource, cfg.Database.MaxConnections, cfg.Database.ShowSql)
+	db, err := store.ConnectWithDriver(cfg.Database.Driver, cfg.Database.Datasource, cfg.Database.MaxConnections, cfg.Database.ShowSql)
 	if err != nil {
 		return nil, err
 	}
@@ -125,10 +138,18 @@ func InjectedCorsMiddleware() *cors.Middleware {
 	return cors.New()
 }
 
-func InjectedAdminMiddleware(services *service.Services) *admin.Middleware {
-	return admin.New(services.User)
-}
-
 func InjectedAuthMiddleware(services *service.Services) *auth.Middleware {
 	return auth.New(services.Auth)
+}
+
+func InjectedACLMiddleware(services *service.Services) *acl.Middleware {
+	return acl.New(services.User, services.RBACEng)
+}
+
+func InjectedAuditMiddleware(services *service.Services) *audit.Middleware {
+	return audit.New(services.Audit)
+}
+
+func InjectedRouterSync(db *store.DB) *router.Sync {
+	return router.New(db)
 }

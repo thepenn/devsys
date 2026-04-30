@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -33,12 +34,28 @@ import (
 	"github.com/thepenn/devsys/service/pipeline/queue"
 	dockerruntime "github.com/thepenn/devsys/service/pipeline/runtime/docker"
 	"github.com/thepenn/devsys/service/pipeline/spec"
+	templatesvc "github.com/thepenn/devsys/service/pipeline/template"
 	systemsvc "github.com/thepenn/devsys/service/system"
 )
 
 const pipelineCacheKey = "pipeline:%d"
 
 var envPlaceholderRegex = regexp.MustCompile(`\$\{(?:env\.)?([A-Za-z0-9_]+)\}`)
+
+// dottedSecretPlaceholderRegex 抓取 ${name.field...} 这类多段占位符 (至少含一个 `.`).
+// 单段 ${VAR} 由 envPlaceholderRegex 处理, 这里只关心点路径形式以便自动发现凭证引用.
+var dottedSecretPlaceholderRegex = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_-]*)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+\}`)
+
+// unresolvedPlaceholderRegex 用于运行时检测 plugin 设置里残留的 ${...} 字面量.
+// 排除 $(...) 命令替换语法和 $$ 转义.
+var unresolvedPlaceholderRegex = regexp.MustCompile(`\$\{[^}\s]+\}`)
+
+// JobScheduler 由独立 Job 服务实现并通过 SetJobScheduler 注入. cron 回调
+// 在不直接 import job 包的前提下回调 Job.TriggerCron, 避免 pipeline ↔ job
+// 循环依赖.
+type JobScheduler interface {
+	TriggerCron(ctx context.Context, jobID int64, expression string) error
+}
 
 // Service orchestrates pipeline lifecycle operations.
 type Service struct {
@@ -52,8 +69,11 @@ type Service struct {
 	defaultTimeout    time.Duration
 	executions        sync.Map
 	systemSvc         *systemsvc.Service
+	templateSvc       *templatesvc.Service
+	jobScheduler      JobScheduler
 	scheduler         *cron.Cron
 	cronEntries       map[int64][]cron.ID
+	jobCronEntries    map[int64][]cron.ID
 	cronMu            sync.Mutex
 	dockerRuntime     *dockerruntime.Runtime
 	dockerRuntimeOnce sync.Once
@@ -94,6 +114,7 @@ type pipelineTaskStep struct {
 	Type       model.StepType          `json:"type,omitempty"`
 	Approval   *pipelineApprovalConfig `json:"approval,omitempty"`
 	Plugin     *pipelinePluginConfig   `json:"plugin,omitempty"`
+	Build      *pipelineBuildConfig    `json:"build,omitempty"`
 	Conditions *pipelineStepConditions `json:"conditions,omitempty"`
 }
 
@@ -103,6 +124,36 @@ type pipelinePluginConfig struct {
 	Privileged bool                `json:"privileged,omitempty"`
 }
 
+// pipelineBuildConfig 是 spec.BuildSpec 在 task payload 里的镜像; 字段一一对应,
+// 引擎跑 step 时根据它生成 buildctl-daemonless.sh 命令.
+type pipelineBuildConfig struct {
+	Registry      string            `json:"registry,omitempty"`
+	Repo          string            `json:"repo"`
+	Username      string            `json:"username,omitempty"`
+	Password      string            `json:"password,omitempty"`
+	Dockerfile    string            `json:"dockerfile,omitempty"`
+	Context       string            `json:"context,omitempty"`
+	Tags          []string          `json:"tags,omitempty"`
+	Platforms     []string          `json:"platforms,omitempty"`
+	Push          *bool             `json:"push,omitempty"`
+	BuildArgs     map[string]string `json:"build_args,omitempty"`
+	Target        string            `json:"target,omitempty"`
+	NoCache       bool              `json:"no_cache,omitempty"`
+	BuildkitImage string            `json:"buildkit_image,omitempty"`
+	Privileged    bool              `json:"privileged,omitempty"`
+}
+
+// defaultBuildkitImage 是 kind=build 步骤使用的 buildkit 镜像默认值. 用
+// privileged 模式 + :latest 兼容所有 Docker daemon (rootless 需要 Linux +
+// Docker 20.10+ + systempaths/apparmor unconfined, Colima/Docker Desktop/旧版
+// Docker 都可能拒收 systempaths=unconfined 而起不来). 用户可在 build.buildkit_image
+// 显式切到 moby/buildkit:rootless 走 rootless 路径.
+const defaultBuildkitImage = "moby/buildkit:latest"
+
+// defaultBuildkitImageRootless 是显式 opt-in 走 rootless 路径时的常用镜像名,
+// 仅供文档/前端模板引用; runtime 是按 image 名是否含 "rootless" 自动决定.
+const defaultBuildkitImageRootless = "moby/buildkit:rootless"
+
 type pipelineApprovalConfig struct {
 	Message   string                     `json:"message"`
 	Approvers []string                   `json:"approvers"`
@@ -110,28 +161,190 @@ type pipelineApprovalConfig struct {
 	Strategy  model.StepApprovalStrategy `json:"strategy"`
 }
 
+// pipelineStepConditions 是 spec.StepConditions 的运行时镜像 (序列化进
+// task.Data 的 JSON). 字段比 spec 简化, 只放真正会被 enforce 的几个 +
+// Groups (用于 OR-of-AND 精确判定).
+//
+// 兼容老 task payload: 旧格式只有 Branches; allows() 在没有 Groups 时
+// 退化到扁平字段 + branch-only 行为.
 type pipelineStepConditions struct {
-	Branches []string `json:"branches,omitempty"`
+	Branches      []string `json:"branches,omitempty"`
+	BranchInclude []string `json:"branch_include,omitempty"`
+	BranchExclude []string `json:"branch_exclude,omitempty"`
+	Events        []string `json:"events,omitempty"`
+	Statuses      []string `json:"statuses,omitempty"`
+	Refs          []string `json:"refs,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
+
+	Groups []conditionGroup `json:"groups,omitempty"`
 }
 
-func (c *pipelineStepConditions) allowsBranch(branch string) bool {
-	if c == nil || len(c.Branches) == 0 {
+// conditionGroup 与 spec.StepConditionGroup 一一对应的运行时形态.
+type conditionGroup struct {
+	Branches      []string `json:"branches,omitempty"`
+	BranchInclude []string `json:"branch_include,omitempty"`
+	BranchExclude []string `json:"branch_exclude,omitempty"`
+	Events        []string `json:"events,omitempty"`
+	Statuses      []string `json:"statuses,omitempty"`
+	Refs          []string `json:"refs,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
+}
+
+// triggerContext 描述当前触发的运行时环境, 用于 step.when 的 enforce.
+// status 字段在 step dispatch 时按当前 pipeline 已有结果填 (success / failure).
+type triggerContext struct {
+	Branch string
+	Event  string
+	Ref    string
+	Repo   string
+	Status string
+}
+
+// allows 评估 step 是否在当前 trigger 下可执行. 决策:
+//   - Groups 非空: ANY group AND-命中 -> 通过.
+//   - Groups 空: 退化到扁平字段, 其中 branch / event / ref / repo / status
+//     都做 AND 校验 (空字段视为通过).
+func (c *pipelineStepConditions) allows(trigger triggerContext) bool {
+	if c == nil {
 		return true
 	}
-	normalized := strings.TrimSpace(branch)
-	for _, candidate := range c.Branches {
-		if normalized == strings.TrimSpace(candidate) {
+	if len(c.Groups) > 0 {
+		for _, g := range c.Groups {
+			if matchConditionGroup(g, trigger) {
+				return true
+			}
+		}
+		return false
+	}
+	// 退化路径
+	flat := conditionGroup{
+		Branches:      c.Branches,
+		BranchInclude: c.BranchInclude,
+		BranchExclude: c.BranchExclude,
+		Events:        c.Events,
+		Statuses:      c.Statuses,
+		Refs:          c.Refs,
+		Repos:         c.Repos,
+	}
+	return matchConditionGroup(flat, trigger)
+}
+
+func matchConditionGroup(g conditionGroup, t triggerContext) bool {
+	if !matchBranch(g, t.Branch) {
+		return false
+	}
+	if !matchAnyGlob(g.Events, t.Event, true) {
+		return false
+	}
+	if !matchAnyGlob(g.Refs, t.Ref, false) {
+		return false
+	}
+	if !matchAnyGlob(g.Repos, t.Repo, false) {
+		return false
+	}
+	if !matchStatus(g.Statuses, t.Status) {
+		return false
+	}
+	return true
+}
+
+func matchBranch(g conditionGroup, branch string) bool {
+	if branch == "" && len(g.Branches) == 0 && len(g.BranchInclude) == 0 && len(g.BranchExclude) == 0 {
+		return true
+	}
+	hasFilter := len(g.Branches) > 0 || len(g.BranchInclude) > 0 || len(g.BranchExclude) > 0
+	if !hasFilter {
+		return true
+	}
+	// exclude 优先: 命中即拒绝
+	for _, pattern := range g.BranchExclude {
+		if matched, _ := matchGlob(pattern, branch); matched {
+			return false
+		}
+	}
+	candidates := append([]string{}, g.Branches...)
+	candidates = append(candidates, g.BranchInclude...)
+	if len(candidates) == 0 {
+		return true // 只有 exclude 没 include -> 未被排除即通过
+	}
+	for _, pattern := range candidates {
+		if matched, _ := matchGlob(pattern, branch); matched {
 			return true
 		}
 	}
 	return false
 }
 
+// matchAnyGlob 在 patterns 至少一项匹配 actual 时返回 true; patterns 为空
+// 视为不约束 (返回 true). exact=true 时跳过 glob 走精确比较.
+func matchAnyGlob(patterns []string, actual string, exact bool) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, p := range patterns {
+		if exact {
+			if strings.TrimSpace(p) == strings.TrimSpace(actual) {
+				return true
+			}
+		} else if matched, _ := matchGlob(p, actual); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// matchStatus 与 step 当前期望状态比较; 仅当 actual 已知时 enforce.
+// 默认 (Statuses 空) 仅在 success 流中执行.
+func matchStatus(statuses []string, actual string) bool {
+	if len(statuses) == 0 {
+		// 默认行为: pipeline 已失败时跳过该 step (与 Woodpecker 默认一致),
+		// 但当前 actual 大多数时候就是 "success" / 空, 这里宽松视为通过,
+		// 让 handleTask 的整体 break-on-failure 逻辑接管.
+		return true
+	}
+	if strings.TrimSpace(actual) == "" {
+		// 状态尚不可知 (执行前), 命中任意 status 都允许 — 真正的过滤在
+		// handleTask 推进时按结果再次评估.
+		return true
+	}
+	for _, s := range statuses {
+		if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(actual)) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlob 用 stdlib path.Match 做 * 通配匹配. 不支持 ** doublestar.
+// 空 pattern 永远不匹配 (避免误通过).
+func matchGlob(pattern, actual string) (bool, error) {
+	pattern = strings.TrimSpace(pattern)
+	actual = strings.TrimSpace(actual)
+	if pattern == "" {
+		return false, nil
+	}
+	// 优先精确字符串比较, 命中即避免 path.Match 出错
+	if pattern == actual {
+		return true, nil
+	}
+	return path.Match(pattern, actual)
+}
+
 func (c *pipelineStepConditions) branchSummary() string {
-	if c == nil || len(c.Branches) == 0 {
+	if c == nil {
 		return ""
 	}
-	return strings.Join(c.Branches, ", ")
+	all := append([]string{}, c.Branches...)
+	all = append(all, c.BranchInclude...)
+	if len(all) == 0 {
+		return ""
+	}
+	return strings.Join(all, ", ")
+}
+
+// allowsBranch 兼容旧调用点; 内部转 allows(triggerContext{Branch: branch}).
+func (c *pipelineStepConditions) allowsBranch(branch string) bool {
+	return c.allows(triggerContext{Branch: branch})
 }
 
 func (step pipelineTaskStep) allowsBranch(branch string) bool {
@@ -139,6 +352,49 @@ func (step pipelineTaskStep) allowsBranch(branch string) bool {
 		return true
 	}
 	return step.Conditions.allowsBranch(branch)
+}
+
+// allowsTrigger 是 allowsBranch 的多维版本; 在 handleTask 里推荐使用此函数.
+func (step pipelineTaskStep) allowsTrigger(trigger triggerContext) bool {
+	if step.Conditions == nil {
+		return true
+	}
+	return step.Conditions.allows(trigger)
+}
+
+// buildPipelineStepConditions 把 spec.StepConditions (含 Groups) 转为
+// 运行时 pipelineStepConditions, 序列化进 task payload. 没有任何条件时
+// 返回 nil 让 step.allowsXxx 直接通过.
+func buildPipelineStepConditions(in *spec.StepConditions) *pipelineStepConditions {
+	if in == nil {
+		return nil
+	}
+	hasFlat := len(in.Branches) > 0 || len(in.BranchInclude) > 0 || len(in.BranchExclude) > 0 ||
+		len(in.Events) > 0 || len(in.Statuses) > 0 || len(in.Refs) > 0 || len(in.Repos) > 0
+	if !hasFlat && len(in.Groups) == 0 {
+		return nil
+	}
+	out := &pipelineStepConditions{
+		Branches:      append([]string{}, in.Branches...),
+		BranchInclude: append([]string{}, in.BranchInclude...),
+		BranchExclude: append([]string{}, in.BranchExclude...),
+		Events:        append([]string{}, in.Events...),
+		Statuses:      append([]string{}, in.Statuses...),
+		Refs:          append([]string{}, in.Refs...),
+		Repos:         append([]string{}, in.Repos...),
+	}
+	for _, g := range in.Groups {
+		out.Groups = append(out.Groups, conditionGroup{
+			Branches:      append([]string{}, g.Branches...),
+			BranchInclude: append([]string{}, g.BranchInclude...),
+			BranchExclude: append([]string{}, g.BranchExclude...),
+			Events:        append([]string{}, g.Events...),
+			Statuses:      append([]string{}, g.Statuses...),
+			Refs:          append([]string{}, g.Refs...),
+			Repos:         append([]string{}, g.Repos...),
+		})
+	}
+	return out
 }
 
 type approvalResult int
@@ -202,6 +458,15 @@ func WithSystemService(system *systemsvc.Service) Option {
 	}
 }
 
+// WithTemplateService 注入通用 pipeline 模板服务. 当 RepoPipelineConfig.Source
+// 为 template 时, triggerPipelineWithEvent 会通过它把模板的 PublishedContent
+// 渲染成最终待 spec.Parse 的 YAML.
+func WithTemplateService(template *templatesvc.Service) Option {
+	return func(s *Service) {
+		s.templateSvc = template
+	}
+}
+
 func NewService(db *store.DB, q *queue.PipelineQueue, c *cache.Cache, opts ...Option) *Service {
 	s := &Service{
 		db:             db,
@@ -211,6 +476,7 @@ func NewService(db *store.DB, q *queue.PipelineQueue, c *cache.Cache, opts ...Op
 		cacheTTL:       2 * time.Minute,
 		defaultTimeout: 15 * time.Minute,
 		cronEntries:    make(map[int64][]cron.ID),
+		jobCronEntries: make(map[int64][]cron.ID),
 	}
 
 	for _, opt := range opts {
@@ -234,10 +500,19 @@ func (s *Service) Start(ctx context.Context) error {
 			return
 		}
 
+		// 启动时把当前生效的 workspace root 打出来. 默认走 ${HOME}/.devsys-workspace,
+		// 是否被 PIPELINE_WORKSPACE_ROOT env / spec.workspace / payload.WorkspaceRoot
+		// 覆盖一目了然, 出 bind mount 不通这种问题时第一时间能定位.
+		log.Info().
+			Str("workspace_root", defaultWorkspaceRoot()).
+			Str("env_override", os.Getenv("PIPELINE_WORKSPACE_ROOT")).
+			Msg("pipeline workspace root resolved")
+
 		scheduler := cron.New()
 		s.cronMu.Lock()
 		s.scheduler = scheduler
 		s.cronEntries = make(map[int64][]cron.ID)
+		s.jobCronEntries = make(map[int64][]cron.ID)
 		s.cronMu.Unlock()
 
 		if err := s.reloadCronSchedules(ctx); err != nil {
@@ -268,6 +543,7 @@ func (s *Service) Shutdown() {
 	scheduler = s.scheduler
 	s.scheduler = nil
 	s.cronEntries = make(map[int64][]cron.ID)
+	s.jobCronEntries = make(map[int64][]cron.ID)
 	s.cronMu.Unlock()
 
 	if scheduler != nil {
@@ -280,32 +556,56 @@ func (s *Service) Shutdown() {
 	}
 }
 
-// CreatePipeline persists the pipeline and related entities.
+// CreatePipeline persists the pipeline and related entities. Number 自动按
+// owner (repo / job) 范围分配, 与 (repo_id, job_id, number) 唯一索引一致.
 func (s *Service) CreatePipeline(ctx context.Context, pipeline *model.Pipeline, workflows []*model.Workflow, steps []*model.Step, tasks []*model.Task) error {
 	if pipeline == nil {
 		return fmt.Errorf("pipeline is required")
 	}
+	if pipeline.OwnerKind == "" {
+		pipeline.OwnerKind = model.PipelineOwnerRepo
+	}
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		if pipeline.Number == 0 {
-			if err := tx.WithContext(ctx).
-				Table("repos").
-				Select("id").
-				Where("id = ?", pipeline.RepoID).
-				Clauses(clause.Locking{Strength: "UPDATE"}).
-				Take(&struct{ ID int64 }{}).Error; err != nil {
-				return err
+			switch pipeline.OwnerKind {
+			case model.PipelineOwnerJob:
+				if err := tx.WithContext(ctx).
+					Table("pipeline_jobs").
+					Select("id").
+					Where("id = ?", pipeline.JobID).
+					Clauses(clause.Locking{Strength: "UPDATE"}).
+					Take(&struct{ ID int64 }{}).Error; err != nil {
+					return err
+				}
+				var nextNumber int64
+				if err := tx.WithContext(ctx).
+					Model(&model.Pipeline{}).
+					Where("job_id = ? AND owner_kind = ?", pipeline.JobID, model.PipelineOwnerJob).
+					Select("COALESCE(MAX(number), 0)").
+					Scan(&nextNumber).Error; err != nil {
+					return err
+				}
+				pipeline.Number = nextNumber + 1
+			default:
+				if err := tx.WithContext(ctx).
+					Table("repos").
+					Select("id").
+					Where("id = ?", pipeline.RepoID).
+					Clauses(clause.Locking{Strength: "UPDATE"}).
+					Take(&struct{ ID int64 }{}).Error; err != nil {
+					return err
+				}
+				var nextNumber int64
+				if err := tx.WithContext(ctx).
+					Model(&model.Pipeline{}).
+					Where("repo_id = ? AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)", pipeline.RepoID, model.PipelineOwnerRepo).
+					Select("COALESCE(MAX(number), 0)").
+					Scan(&nextNumber).Error; err != nil {
+					return err
+				}
+				pipeline.Number = nextNumber + 1
 			}
-
-			var nextNumber int64
-			if err := tx.WithContext(ctx).
-				Model(&model.Pipeline{}).
-				Where("repo_id = ?", pipeline.RepoID).
-				Select("COALESCE(MAX(number), 0)").
-				Scan(&nextNumber).Error; err != nil {
-				return err
-			}
-			pipeline.Number = nextNumber + 1
 		}
 
 		if err := tx.WithContext(ctx).Create(pipeline).Error; err != nil {
@@ -429,8 +729,73 @@ func (s *Service) EnsurePipelineConfig(ctx context.Context, repo *model.Repo) (*
 	return s.UpsertPipelineConfig(ctx, repo.ID, "")
 }
 
-// UpsertPipelineConfig creates or updates the pipeline configuration for the given repository.
+// PipelineConfigInput 描述一次 UpsertPipelineConfigSource 的入参.
+//   - Source 默认 inline:
+//       - inline:   直接存 cfg.Content.
+//       - template: 必须提供 TemplateID; Content 仍可作为切换快照保留.
+//       - compose:  必须提供非空 ComposeSteps; TemplateID / Variables 不使用.
+type PipelineConfigInput struct {
+	Source       string
+	Content      string
+	TemplateID   *int64
+	Variables    map[string]string
+	ComposeSteps []model.ComposeStepRef
+}
+
+// UpsertPipelineConfig 兼容旧调用 (inline + content) 的快捷方法; 内部转发到
+// UpsertPipelineConfigSource. 保留入口避免大面积修改 router / 自动 ensure 路径.
 func (s *Service) UpsertPipelineConfig(ctx context.Context, repoID int64, content string) (*model.RepoPipelineConfig, error) {
+	return s.UpsertPipelineConfigSource(ctx, repoID, PipelineConfigInput{
+		Source:  model.PipelineConfigSourceInline,
+		Content: content,
+	})
+}
+
+// UpsertPipelineConfigSource 是更通用的版本, 支持 inline / template / compose
+// 三种来源. 切换 source 时旧字段处理:
+//   - 切到 template: 保留 Content 作为快照, 清空 ComposeSteps; 写入新 TemplateID/Variables.
+//   - 切到 compose:  保留 Content 作为快照, 清空 TemplateID/Variables; 写入新 ComposeSteps.
+//   - 切到 inline:   写入新 Content, 清空 TemplateID/Variables/ComposeSteps.
+func (s *Service) UpsertPipelineConfigSource(ctx context.Context, repoID int64, in PipelineConfigInput) (*model.RepoPipelineConfig, error) {
+	source := strings.TrimSpace(in.Source)
+	switch source {
+	case model.PipelineConfigSourceTemplate, model.PipelineConfigSourceCompose:
+		// ok
+	default:
+		source = model.PipelineConfigSourceInline
+	}
+	switch source {
+	case model.PipelineConfigSourceTemplate:
+		if in.TemplateID == nil || *in.TemplateID <= 0 {
+			return nil, fmt.Errorf("template id is required when source is template")
+		}
+		if s.templateSvc != nil {
+			if _, err := s.templateSvc.Get(ctx, *in.TemplateID); err != nil {
+				return nil, err
+			}
+		}
+	case model.PipelineConfigSourceCompose:
+		if len(in.ComposeSteps) == 0 {
+			return nil, fmt.Errorf("compose_steps is required when source is compose")
+		}
+		// 校验每个 ref 都指向已存在的 step 模板; 容错不强校验已发布 (允许
+		// 用户先存配置, 模板后再发布).
+		if s.templateSvc != nil {
+			for idx, ref := range in.ComposeSteps {
+				if ref.StepTemplateID <= 0 {
+					return nil, fmt.Errorf("compose ref #%d: step_template_id missing", idx+1)
+				}
+				tpl, err := s.templateSvc.Get(ctx, ref.StepTemplateID)
+				if err != nil {
+					return nil, fmt.Errorf("compose ref #%d (id=%d): %w", idx+1, ref.StepTemplateID, err)
+				}
+				if tpl.EffectiveKind() != model.PipelineTemplateKindStep {
+					return nil, fmt.Errorf("compose ref #%d (%s): template kind must be step", idx+1, tpl.Name)
+				}
+			}
+		}
+	}
+
 	now := time.Now().Unix()
 	var result *model.RepoPipelineConfig
 
@@ -443,7 +808,15 @@ func (s *Service) UpsertPipelineConfig(ctx context.Context, repoID int64, conten
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			cfg := defaultPipelineSettings()
 			cfg.RepoID = repoID
-			cfg.Content = content
+			cfg.Source = source
+			cfg.Content = in.Content
+			switch source {
+			case model.PipelineConfigSourceTemplate:
+				cfg.TemplateID = in.TemplateID
+				cfg.TemplateVariables = cloneStringMapSafe(in.Variables)
+			case model.PipelineConfigSourceCompose:
+				cfg.ComposeSteps = append([]model.ComposeStepRef{}, in.ComposeSteps...)
+			}
 			cfg.Created = now
 			cfg.Updated = now
 			if err := tx.WithContext(ctx).Create(cfg).Error; err != nil {
@@ -453,7 +826,24 @@ func (s *Service) UpsertPipelineConfig(ctx context.Context, repoID int64, conten
 		case err != nil:
 			return err
 		default:
-			existing.Content = content
+			existing.Source = source
+			switch source {
+			case model.PipelineConfigSourceTemplate:
+				existing.TemplateID = in.TemplateID
+				existing.TemplateVariables = cloneStringMapSafe(in.Variables)
+				existing.ComposeSteps = nil
+				// Content 保留为切换前的快照, 不覆盖
+			case model.PipelineConfigSourceCompose:
+				existing.TemplateID = nil
+				existing.TemplateVariables = nil
+				existing.ComposeSteps = append([]model.ComposeStepRef{}, in.ComposeSteps...)
+				// Content 保留为切换前的快照, 不覆盖
+			default: // inline
+				existing.Content = in.Content
+				existing.TemplateID = nil
+				existing.TemplateVariables = nil
+				existing.ComposeSteps = nil
+			}
 			existing.Updated = now
 			if err := tx.WithContext(ctx).Save(&existing).Error; err != nil {
 				return err
@@ -476,6 +866,77 @@ func (s *Service) UpsertPipelineConfig(ctx context.Context, repoID int64, conten
 	return normalized, nil
 }
 
+func cloneStringMapSafe(in map[string]string) map[string]string {
+	if in == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// resolvePipelineForTrigger 把 RepoPipelineConfig 转成最终待 BuildAndEnqueueRun
+// 消费的形态. 返回 (yamlContent, specOverride, err); 三种来源各自对应一种返回:
+//
+//   - inline:   返回 (cfg.Content, nil, nil) — 由 BuildAndEnqueueRun 内部 spec.Parse.
+//   - template: 合并 repo_ctx + cfg.TemplateVariables 后调 templateSvc.Resolve,
+//               返回 (renderedYAML, nil, nil); cfg.TemplateVariables 优先级最高.
+//   - compose:  合并 repo_ctx 后调 templateSvc.ResolveCompose, 已经预解析为
+//               *spec.PipelineSpec, 返回 ("", spec, nil) 让 BuildAndEnqueueRun
+//               跳过 spec.Parse 直接使用.
+//
+// repo / branch / commit / author 用于构造渲染上下文 (CI_REPO_FULL_NAME /
+// REPO_CLONE_URL_AUTH / CI_PIPELINE_BRANCH 等), 让模板里 ${VAR} 能解析到
+// 当前项目的真实值, 而不是空串.
+func (s *Service) resolvePipelineForTrigger(
+	ctx context.Context,
+	repo *model.Repo,
+	cfg *model.RepoPipelineConfig,
+	branch, commit, author string,
+) (string, *spec.PipelineSpec, error) {
+	if cfg == nil {
+		return "", nil, fmt.Errorf("pipeline configuration missing")
+	}
+	switch cfg.EffectiveSource() {
+	case model.PipelineConfigSourceTemplate:
+		if s.templateSvc == nil {
+			return "", nil, fmt.Errorf("pipeline template service not configured")
+		}
+		if cfg.TemplateID == nil || *cfg.TemplateID <= 0 {
+			return "", nil, fmt.Errorf("pipeline template id missing")
+		}
+		// repo_ctx 是基线, cfg.TemplateVariables 覆盖之 (项目自定义优先).
+		mergedVars := s.BuildRepoRenderContext(ctx, repo, cfg, branch, commit, author)
+		for k, v := range cfg.TemplateVariables {
+			mergedVars[k] = v
+		}
+		yamlContent, err := s.templateSvc.Resolve(ctx, *cfg.TemplateID, mergedVars)
+		if err != nil {
+			return "", nil, fmt.Errorf("解析通用 pipeline 模板失败: %w", err)
+		}
+		return yamlContent, nil, nil
+	case model.PipelineConfigSourceCompose:
+		if s.templateSvc == nil {
+			return "", nil, fmt.Errorf("pipeline template service not configured")
+		}
+		if len(cfg.ComposeSteps) == 0 {
+			return "", nil, fmt.Errorf("compose_steps is empty")
+		}
+		// compose 模式只用 repo_ctx 作为全局 vars; per-ref 的 Variables
+		// 在 ResolveCompose 内部按片段覆盖.
+		globalVars := s.BuildRepoRenderContext(ctx, repo, cfg, branch, commit, author)
+		specDef, err := s.templateSvc.ResolveCompose(ctx, cfg.ComposeSteps, globalVars)
+		if err != nil {
+			return "", nil, fmt.Errorf("组装步骤模板失败: %w", err)
+		}
+		return "", specDef, nil
+	default: // inline
+		return cfg.Content, nil, nil
+	}
+}
+
 // TriggerManualPipeline stores a pipeline record representing a manual run against the provided configuration.
 func (s *Service) TriggerManualPipeline(ctx context.Context, repo *model.Repo, author string, opts model.PipelineOptions, cfg *model.RepoPipelineConfig) (*model.Pipeline, error) {
 	normalizedAuthor := strings.TrimSpace(author)
@@ -487,20 +948,43 @@ func (s *Service) TriggerManualPipeline(ctx context.Context, repo *model.Repo, a
 	return s.triggerPipelineWithEvent(ctx, repo, cfg, opts, model.EventManual, normalizedAuthor, message, title)
 }
 
+// BuildAndEnqueueInput 描述一次 pipeline run 创建所需的全部输入. Repo 触发
+// 与独立 Job 触发都通过 BuildAndEnqueueRun 走同一份 spec→Pipeline+Workflow+
+// Step+Task 的构造逻辑, 仅在 owner 信息 (RepoID/JobID/OwnerKind) 和 git 元
+// 数据 (RepoURL/RepoClone/RepoBranch, 可空) 上不同.
+type BuildAndEnqueueInput struct {
+	OwnerKind string // model.PipelineOwnerRepo | PipelineOwnerJob
+	RepoID    int64  // job 触发时为 0
+	JobID     int64  // repo 触发时为 0
+	Event     model.WebhookEvent
+	Author    string
+	Message   string
+	Title     string
+	Branch    string
+	Commit    string
+	Variables map[string]string
+	YAML      string
+	// SpecOverride 非 nil 时跳过 spec.Parse(YAML), 直接使用传入的
+	// PipelineSpec. 用于 source=compose 这类已经在外部完成解析+合并的场景.
+	SpecOverride *spec.PipelineSpec
+	// Git 元数据; 如果留空, payload 里 RepoClone="" 让 handleTask 跳过 clone.
+	RepoURL    string
+	RepoClone  string
+	RepoBranch string
+	// 注入到 task.Labels 的额外 kv (比如 repo full_name / job name).
+	ExtraLabels map[string]string
+	// 触发完成后做 retention 清理的回调; 可选 (job 当前不做 retention).
+	AfterEnqueue func(pipeline *model.Pipeline)
+}
+
 func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo, cfg *model.RepoPipelineConfig, opts model.PipelineOptions, event model.WebhookEvent, author, message, title string) (*model.Pipeline, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("repository is required")
 	}
-	if cfg == nil || strings.TrimSpace(cfg.Content) == "" {
+	if cfg == nil {
 		return nil, fmt.Errorf("pipeline configuration missing")
 	}
 
-	normalizedAuthor := strings.TrimSpace(author)
-	if normalizedAuthor == "" {
-		normalizedAuthor = "system"
-	}
-
-	now := time.Now().Unix()
 	branch := strings.TrimSpace(opts.Branch)
 	if branch == "" {
 		branch = strings.TrimSpace(repo.Branch)
@@ -508,27 +992,118 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 			branch = "main"
 		}
 	}
-
-	if opts.Variables == nil {
-		opts.Variables = map[string]string{}
+	commit := strings.TrimSpace(opts.Commit)
+	normalizedAuthor := strings.TrimSpace(author)
+	if normalizedAuthor == "" {
+		normalizedAuthor = "system"
 	}
 
-	specDef, err := spec.Parse(cfg.Content)
+	yamlContent, specOverride, err := s.resolvePipelineForTrigger(ctx, repo, cfg, branch, commit, normalizedAuthor)
 	if err != nil {
 		return nil, err
 	}
+	if specOverride == nil && strings.TrimSpace(yamlContent) == "" {
+		return nil, fmt.Errorf("pipeline configuration missing")
+	}
 
-	runMessage := strings.TrimSpace(message)
+	extraLabels := map[string]string{
+		"repo": repo.FullName,
+		"org":  fmt.Sprintf("%d", repo.OrgID),
+	}
+
+	return s.BuildAndEnqueueRun(ctx, BuildAndEnqueueInput{
+		OwnerKind:    model.PipelineOwnerRepo,
+		RepoID:       repo.ID,
+		Event:        event,
+		Author:       author,
+		Message:      message,
+		Title:        title,
+		Branch:       branch,
+		Commit:       commit,
+		Variables:    opts.Variables,
+		YAML:         yamlContent,
+		SpecOverride: specOverride,
+		RepoURL:      repo.ForgeURL,
+		RepoClone:    repo.Clone,
+		RepoBranch:   repo.Branch,
+		ExtraLabels:  extraLabels,
+		AfterEnqueue: func(pipeline *model.Pipeline) {
+			if settings, err := s.GetPipelineSettings(ctx, repo.ID); err != nil {
+				log.Warn().Err(err).Int64("repo_id", repo.ID).Msg("failed to load pipeline settings for retention")
+			} else {
+				if settings == nil {
+					settings = defaultPipelineSettings()
+				}
+				if settings.MaxRecords <= 0 {
+					settings.MaxRecords = 10
+				}
+				if err := s.enforcePipelineRetention(ctx, repo, settings); err != nil {
+					log.Warn().Err(err).Int64("repo_id", repo.ID).Msg("failed to enforce pipeline retention")
+				}
+			}
+		},
+	})
+}
+
+// BuildAndEnqueueRun 是 repo / job 共用的 pipeline run 构造与入队逻辑.
+// 调用方只需准备好已渲染过 ${VAR} 的 YAML 与 owner 元数据;
+// 也可以直接传 SpecOverride 跳过 YAML 解析 (compose 模式).
+func (s *Service) BuildAndEnqueueRun(ctx context.Context, in BuildAndEnqueueInput) (*model.Pipeline, error) {
+	if in.SpecOverride == nil && strings.TrimSpace(in.YAML) == "" {
+		return nil, fmt.Errorf("pipeline yaml is empty")
+	}
+	ownerKind := in.OwnerKind
+	if ownerKind == "" {
+		ownerKind = model.PipelineOwnerRepo
+	}
+
+	normalizedAuthor := strings.TrimSpace(in.Author)
+	if normalizedAuthor == "" {
+		normalizedAuthor = "system"
+	}
+
+	branch := strings.TrimSpace(in.Branch)
+	if branch == "" {
+		branch = "main"
+	}
+
+	variables := in.Variables
+	if variables == nil {
+		variables = map[string]string{}
+	}
+
+	var (
+		specDef *spec.PipelineSpec
+		err     error
+	)
+	if in.SpecOverride != nil {
+		specDef = in.SpecOverride
+	} else {
+		specDef, err = spec.Parse(in.YAML)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	event := in.Event
+	if string(event) == "" {
+		event = model.EventManual
+	}
+
+	runMessage := strings.TrimSpace(in.Message)
 	if runMessage == "" {
 		runMessage = defaultPipelineMessage(event, normalizedAuthor)
 	}
-	runTitle := strings.TrimSpace(title)
+	runTitle := strings.TrimSpace(in.Title)
 	if runTitle == "" {
 		runTitle = fmt.Sprintf("%s run", string(event))
 	}
 
+	now := time.Now().Unix()
 	pipeline := &model.Pipeline{
-		RepoID:              repo.ID,
+		RepoID:              in.RepoID,
+		JobID:               in.JobID,
+		OwnerKind:           ownerKind,
 		Author:              normalizedAuthor,
 		Event:               event,
 		Status:              model.StatusPending,
@@ -538,8 +1113,8 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		Updated:             now,
 		Branch:              branch,
 		Ref:                 fmt.Sprintf("refs/heads/%s", branch),
-		Commit:              strings.TrimSpace(opts.Commit),
-		AdditionalVariables: opts.Variables,
+		Commit:              strings.TrimSpace(in.Commit),
+		AdditionalVariables: variables,
 	}
 
 	workflow := &model.Workflow{
@@ -559,6 +1134,32 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		stepType := model.StepTypeCommands
 		var approvalModel *model.StepApproval
 		var approvalTaskCfg *pipelineApprovalConfig
+		var buildCfg *pipelineBuildConfig
+		if stepSpec.Kind == spec.StepKindBuild && stepSpec.Build != nil {
+			stepType = model.StepTypeBuild
+			b := stepSpec.Build
+			buildCfg = &pipelineBuildConfig{
+				Registry:      b.Registry,
+				Repo:          b.Repo,
+				Username:      b.Username,
+				Password:      b.Password,
+				Dockerfile:    b.Dockerfile,
+				Context:       b.Context,
+				Tags:          append([]string{}, b.Tags...),
+				Platforms:     append([]string{}, b.Platforms...),
+				Push:          b.Push,
+				Target:        b.Target,
+				NoCache:       b.NoCache,
+				BuildkitImage: b.BuildkitImage,
+				Privileged:    b.Privileged,
+			}
+			if len(b.BuildArgs) > 0 {
+				buildCfg.BuildArgs = make(map[string]string, len(b.BuildArgs))
+				for k, v := range b.BuildArgs {
+					buildCfg.BuildArgs[k] = v
+				}
+			}
+		}
 		if stepSpec.Kind == spec.StepKindApproval {
 			stepType = model.StepTypeApproval
 			strategy := model.StepApprovalStrategyAny
@@ -605,16 +1206,19 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		if len(stepSpec.Env) > 0 {
 			stepEnvVars = cloneStringMap(stepSpec.Env)
 		}
-		var stepConditions *pipelineStepConditions
-		if stepSpec.Conditions != nil && len(stepSpec.Conditions.Branches) > 0 {
-			stepConditions = &pipelineStepConditions{
-				Branches: append([]string{}, stepSpec.Conditions.Branches...),
+		stepConditions := buildPipelineStepConditions(stepSpec.Conditions)
+		stepImage := stepSpec.Image
+		if buildCfg != nil {
+			img := strings.TrimSpace(buildCfg.BuildkitImage)
+			if img == "" {
+				img = defaultBuildkitImage
 			}
+			stepImage = img
 		}
 		taskSteps = append(taskSteps, pipelineTaskStep{
 			PID:        pid,
 			Name:       stepName,
-			Image:      stepSpec.Image,
+			Image:      stepImage,
 			Commands:   append([]string{}, stepSpec.Commands...),
 			Secrets:    stepSpec.Secrets,
 			Env:        stepEnvVars,
@@ -623,10 +1227,15 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 			Type:       stepType,
 			Approval:   approvalTaskCfg,
 			Plugin:     pluginCfg,
+			Build:      buildCfg,
 			Conditions: stepConditions,
 		})
 	}
 
+	taskLabels := map[string]string{}
+	for k, v := range in.ExtraLabels {
+		taskLabels[k] = v
+	}
 	task := &model.Task{
 		ID:           generateRandomID("task"),
 		PID:          1,
@@ -634,10 +1243,7 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		Dependencies: []string{},
 		RunOn:        []string{string(model.StatusSuccess)},
 		DepStatus:    map[string]model.StatusValue{},
-		Labels:       map[string]string{},
-	}
-	if err := task.ApplyLabelsFromRepo(repo); err != nil {
-		log.Warn().Err(err).Msg("failed to apply labels to task")
+		Labels:       taskLabels,
 	}
 
 	if err := s.CreatePipeline(ctx, pipeline, []*model.Workflow{workflow}, steps, []*model.Task{task}); err != nil {
@@ -646,13 +1252,13 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 
 	payload := pipelineTaskPayload{
 		PipelineID:    pipeline.ID,
-		RepoID:        repo.ID,
+		RepoID:        in.RepoID,
 		Branch:        branch,
 		Commit:        pipeline.Commit,
 		RunName:       workflow.Name,
-		RepoURL:       repo.ForgeURL,
-		RepoClone:     repo.Clone,
-		RepoBranch:    repo.Branch,
+		RepoURL:       in.RepoURL,
+		RepoClone:     in.RepoClone,
+		RepoBranch:    in.RepoBranch,
 		WorkspaceRoot: specDef.Workspace,
 		Steps:         taskSteps,
 	}
@@ -686,18 +1292,8 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 		return nil, err
 	}
 
-	if settings, err := s.GetPipelineSettings(ctx, repo.ID); err != nil {
-		log.Warn().Err(err).Int64("repo_id", repo.ID).Msg("failed to load pipeline settings for retention")
-	} else {
-		if settings == nil {
-			settings = defaultPipelineSettings()
-		}
-		if settings.MaxRecords <= 0 {
-			settings.MaxRecords = 10
-		}
-		if err := s.enforcePipelineRetention(ctx, repo, settings); err != nil {
-			log.Warn().Err(err).Int64("repo_id", repo.ID).Msg("failed to enforce pipeline retention")
-		}
+	if in.AfterEnqueue != nil {
+		in.AfterEnqueue(pipeline)
 	}
 
 	return pipeline, nil
@@ -718,9 +1314,11 @@ func (s *Service) ListPipelinesByRepo(ctx context.Context, repoID int64, page, p
 	var total int64
 
 	err := s.db.View(func(tx *gorm.DB) error {
+		// 显式排除 job 触发的行 (owner_kind='job'), 避免历史数据回填后
+		// 把 RepoID=0 的 Job 混进来.
 		query := tx.WithContext(ctx).
 			Model(&model.Pipeline{}).
-			Where("repo_id = ?", repoID)
+			Where("repo_id = ? AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)", repoID, model.PipelineOwnerRepo)
 		if err := query.Count(&total).Error; err != nil {
 			return err
 		}
@@ -734,6 +1332,48 @@ func (s *Service) ListPipelinesByRepo(ctx context.Context, repoID int64, page, p
 		return nil, 0, err
 	}
 
+	for _, pipeline := range pipelines {
+		if pipeline == nil {
+			continue
+		}
+		if strings.TrimSpace(pipeline.Message) == "" {
+			pipeline.Message = defaultPipelineMessage(pipeline.Event, pipeline.Author)
+		}
+	}
+	return pipelines, total, nil
+}
+
+// ListPipelinesByJob 与 ListPipelinesByRepo 同形态, 仅 where 条件换成 job_id +
+// owner_kind=job. 用于独立 Job 的运行历史 Tab.
+func (s *Service) ListPipelinesByJob(ctx context.Context, jobID int64, page, perPage int) ([]*model.Pipeline, int64, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = 20
+	} else if perPage > 100 {
+		perPage = 100
+	}
+
+	var pipelines []*model.Pipeline
+	var total int64
+
+	err := s.db.View(func(tx *gorm.DB) error {
+		query := tx.WithContext(ctx).
+			Model(&model.Pipeline{}).
+			Where("job_id = ? AND owner_kind = ?", jobID, model.PipelineOwnerJob)
+		if err := query.Count(&total).Error; err != nil {
+			return err
+		}
+		return query.
+			Order("created DESC").
+			Offset((page - 1) * perPage).
+			Limit(perPage).
+			Find(&pipelines).Error
+	})
+	if err != nil {
+		return nil, 0, err
+	}
 	for _, pipeline := range pipelines {
 		if pipeline == nil {
 			continue
@@ -824,6 +1464,15 @@ func (s *Service) UpsertPipelineSettings(ctx context.Context, repoID int64, sett
 
 // GetPipelineRunDetail returns pipeline, workflow, step and log information for a specific run.
 func (s *Service) GetPipelineRunDetail(ctx context.Context, repoID, pipelineID int64) (*PipelineRunDetail, error) {
+	return s.getRunDetailWhere(ctx, pipelineID, "id = ? AND repo_id = ? AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)", []any{pipelineID, repoID, model.PipelineOwnerRepo})
+}
+
+// GetJobPipelineRunDetail 是 GetPipelineRunDetail 的 Job 变体, 按 job_id 鉴权.
+func (s *Service) GetJobPipelineRunDetail(ctx context.Context, jobID, pipelineID int64) (*PipelineRunDetail, error) {
+	return s.getRunDetailWhere(ctx, pipelineID, "id = ? AND job_id = ? AND owner_kind = ?", []any{pipelineID, jobID, model.PipelineOwnerJob})
+}
+
+func (s *Service) getRunDetailWhere(ctx context.Context, pipelineID int64, whereClause string, whereArgs []any) (*PipelineRunDetail, error) {
 	detail := &PipelineRunDetail{
 		Workflows: []*model.Workflow{},
 		Steps:     []*model.Step{},
@@ -833,7 +1482,7 @@ func (s *Service) GetPipelineRunDetail(ctx context.Context, repoID, pipelineID i
 	err := s.db.View(func(tx *gorm.DB) error {
 		var pipeline model.Pipeline
 		if err := tx.WithContext(ctx).
-			Where("id = ? AND repo_id = ?", pipelineID, repoID).
+			Where(whereClause, whereArgs...).
 			Take(&pipeline).Error; err != nil {
 			return err
 		}
@@ -890,6 +1539,15 @@ func (s *Service) GetPipelineRunDetail(ctx context.Context, repoID, pipelineID i
 }
 
 func (s *Service) SubmitStepApproval(ctx context.Context, repoID, pipelineID, stepID int64, actor string, action string, comment string) (*model.Step, error) {
+	return s.submitStepApproval(ctx, model.PipelineOwnerRepo, repoID, pipelineID, stepID, actor, action, comment)
+}
+
+// SubmitJobStepApproval 是 SubmitStepApproval 的 Job 变体, 按 job_id 鉴权.
+func (s *Service) SubmitJobStepApproval(ctx context.Context, jobID, pipelineID, stepID int64, actor string, action string, comment string) (*model.Step, error) {
+	return s.submitStepApproval(ctx, model.PipelineOwnerJob, jobID, pipelineID, stepID, actor, action, comment)
+}
+
+func (s *Service) submitStepApproval(ctx context.Context, ownerKind string, ownerID int64, pipelineID, stepID int64, actor string, action string, comment string) (*model.Step, error) {
 	actor = strings.TrimSpace(actor)
 	if actor == "" {
 		return nil, fmt.Errorf("审批用户无效")
@@ -911,7 +1569,7 @@ func (s *Service) SubmitStepApproval(ctx context.Context, repoID, pipelineID, st
 		}
 		return nil, err
 	}
-	if pipeline.RepoID != repoID {
+	if !pipelineOwnerMatches(&pipeline, ownerKind, ownerID) {
 		return nil, gorm.ErrRecordNotFound
 	}
 	var finalAction string
@@ -1105,9 +1763,17 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		return err
 	}
 
-	repo, err := s.fetchRepo(ctx, payload.RepoID)
-	if err != nil {
-		return err
+	// payload.RepoID == 0 表示这是一次独立 Job 触发, 没有 repo 行可拉.
+	// 构造一个仅有 payload 字段的合成 repo, 让下游 prepareWorkspace /
+	// provideRepoEnv 等逻辑无差别工作; 不会写库.
+	var repo *model.Repo
+	if payload.RepoID > 0 {
+		repo, err = s.fetchRepo(ctx, payload.RepoID)
+		if err != nil {
+			return err
+		}
+	} else {
+		repo = syntheticJobRepo(payload)
 	}
 
 	pipelineRecord, err := s.fetchPipeline(ctx, payload.PipelineID)
@@ -1115,11 +1781,19 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		return err
 	}
 
-	settings, err := s.GetPipelineSettings(ctx, repo.ID)
-	if err != nil {
-		return err
+	// Job 没有 repo_pipeline_configs 行, 用默认配置避免 GetPipelineSettings
+	// 触发的二次 ensure 写入一个 repo_id=0 的脏行.
+	var settings *model.RepoPipelineConfig
+	if repo.ID > 0 {
+		settings, err = s.GetPipelineSettings(ctx, repo.ID)
+		if err != nil {
+			return err
+		}
+	} else {
+		settings = defaultPipelineSettings()
 	}
 
+	s.discoverCertAliasesFromSettings(ctx, payload.Steps)
 	allRequested := collectRequestedAliases(payload.Steps)
 
 	certEnv, cloneOverride, resolvedSecrets := s.buildCertificateEnv(ctx, repo, settings, allRequested)
@@ -1196,7 +1870,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		}
 		dockerfileInjected = true
 		if logger != nil {
-			_ = logger("未检测到仓库中的 Dockerfile，已使用系统配置的 Dockerfile")
+			_ = logger(fmt.Sprintf("未检测到仓库中的 Dockerfile, 已使用系统配置的 Dockerfile (%d 字节, 写入 %s)",
+				len(template), dockerfilePath))
 		}
 		return nil
 	}
@@ -1225,15 +1900,24 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		}
 
 		currentBranch := strings.TrimSpace(firstNonEmpty(payload.Branch, pipelineRecord.Branch))
-		if !execStep.allowsBranch(currentBranch) {
+		// 多维 when 评估: branch + event + ref + repo + (status 在 step
+		// dispatch 前基本未知, 留空让默认行为接管). repo 用 task.Labels
+		// 里 ApplyLabelsFromRepo 写进去的 "repo" full_name.
+		trigger := triggerContext{
+			Branch: currentBranch,
+			Event:  string(pipelineRecord.Event),
+			Ref:    pipelineRecord.Ref,
+			Repo:   task.Labels["repo"],
+		}
+		if !execStep.allowsTrigger(trigger) {
 			summary := ""
 			if execStep.Conditions != nil {
 				summary = execStep.Conditions.branchSummary()
 			}
-			logMessage := "步骤因分支条件被跳过"
+			logMessage := "步骤因 when 条件被跳过"
 			switch {
 			case summary != "" && currentBranch != "":
-				logMessage = fmt.Sprintf("%s（当前分支 %s，仅在 %s 执行）", logMessage, currentBranch, summary)
+				logMessage = fmt.Sprintf("%s（当前分支 %s，要求 %s）", logMessage, currentBranch, summary)
 			case summary != "":
 				logMessage = fmt.Sprintf("%s（要求分支：%s）", logMessage, summary)
 			case currentBranch != "":
@@ -1381,12 +2065,24 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			pluginEnv = applySecretPlaceholdersToMap(pluginEnv, stepSecrets)
 			// use full step env so placeholders like ${CI_REPO_NAME} resolve
 			pluginEnv = applyEnvPlaceholdersToMap(pluginEnv, stepEnv)
+			if isDockerPluginImage(execStep.Image) {
+				autofillDockerPluginEnv(pluginEnv, stepSecrets)
+			}
+			if leftover := findUnresolvedPlaceholders(pluginEnv); len(leftover) > 0 {
+				err := fmt.Errorf("步骤 %q 的 plugin 设置存在未解析的占位符 %v; 请检查 step 是否声明了 certificate: <name>, 凭证名是否与凭证管理中一致, 类型是否匹配", execStep.Name, leftover)
+				_ = logFn(err.Error())
+				pipelineStatus = model.StatusFailure
+				failureMessage = err.Error()
+				_ = s.setStepFinished(ctx, stepRecord.ID, statusFromPipeline(pipelineStatus), time.Now().Unix(), err, -1)
+				break
+			}
 			for key, value := range pluginEnv {
 				stepEnv[key] = value
 			}
 		}
 
-		usePluginRuntime := execStep.Plugin != nil && len(execStep.Commands) == 0
+		useBuildRuntime := execStep.Type == model.StepTypeBuild && execStep.Build != nil
+		usePluginRuntime := !useBuildRuntime && execStep.Plugin != nil && len(execStep.Commands) == 0
 		commands := append([]string{}, execStep.Commands...)
 		commands = applySecretPlaceholders(commands, stepSecrets)
 		maskFn := buildSecretMasker(stepSecrets)
@@ -1409,7 +2105,23 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			return ensureDockerfile(false, logFn)
 		}
 
-		if usePluginRuntime {
+		if useBuildRuntime {
+			exitCode, err := s.runBuildStep(taskCtx, execStep, stepEnv, workspace, stepSecrets, ensureDockerfile, logFn)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					pipelineStatus = model.StatusKilled
+					failureMessage = "pipeline canceled"
+				} else {
+					pipelineStatus = model.StatusFailure
+					failureMessage = err.Error()
+				}
+				_ = s.setStepFinished(ctx, stepRecord.ID, statusFromPipeline(pipelineStatus), time.Now().Unix(), err, exitCode)
+				break
+			}
+			if err := s.setStepFinished(ctx, stepRecord.ID, model.StatusSuccess, time.Now().Unix(), nil, 0); err != nil {
+				return err
+			}
+		} else if usePluginRuntime {
 			exitCode, err := s.runPluginStep(taskCtx, execStep, stepEnv, workspace, execStep.Plugin, ensureDockerfile, logFn)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
@@ -1565,6 +2277,43 @@ func (s *Service) fetchRepo(ctx context.Context, repoID int64) (*model.Repo, err
 	return &repo, nil
 }
 
+// pipelineOwnerMatches 校验 pipeline 行是否属于指定 owner; 兼容老数据
+// (owner_kind 为空当作 repo 处理).
+func pipelineOwnerMatches(p *model.Pipeline, ownerKind string, ownerID int64) bool {
+	if p == nil {
+		return false
+	}
+	switch ownerKind {
+	case model.PipelineOwnerJob:
+		return p.OwnerKind == model.PipelineOwnerJob && p.JobID == ownerID
+	default:
+		// repo 触发: owner_kind 可能为空 (老数据) 也算 repo.
+		if p.OwnerKind != "" && p.OwnerKind != model.PipelineOwnerRepo {
+			return false
+		}
+		return p.RepoID == ownerID
+	}
+}
+
+// syntheticJobRepo 构造一个 ID=0 的临时 Repo, 用于独立 Job 的 handleTask 路径.
+// 字段从 task payload 取, 让 provideRepoEnv / prepareWorkspace 等不依赖 DB
+// 的逻辑可以无差别复用. 不会被持久化.
+func syntheticJobRepo(payload pipelineTaskPayload) *model.Repo {
+	name := strings.TrimSpace(payload.RunName)
+	if name == "" {
+		name = fmt.Sprintf("job-%d", payload.PipelineID)
+	}
+	return &model.Repo{
+		ID:       0,
+		Name:     name,
+		FullName: name,
+		Owner:    "system",
+		Branch:   strings.TrimSpace(payload.RepoBranch),
+		Clone:    strings.TrimSpace(payload.RepoClone),
+		ForgeURL: strings.TrimSpace(payload.RepoURL),
+	}
+}
+
 func (s *Service) fetchPipeline(ctx context.Context, pipelineID int64) (*model.Pipeline, error) {
 	var pipeline model.Pipeline
 	err := s.db.View(func(tx *gorm.DB) error {
@@ -1588,7 +2337,8 @@ func (s *Service) prepareWorkspace(ctx context.Context, repo *model.Repo, pipeli
 
 	projectName := sanitizeDirName(repo.Name)
 	if projectName == "" {
-		projectName = fmt.Sprintf("repo-%d", repo.ID)
+		// repo.ID == 0 表示独立 Job, 没有 repo 行; 用 pipeline id 兜底.
+		projectName = fmt.Sprintf("job-%d", pipelineID)
 	}
 
 	workspace := filepath.Join(rootDir, projectName, fmt.Sprintf("%d", pipelineID))
@@ -1612,7 +2362,7 @@ func (s *Service) executeCommands(ctx context.Context, step pipelineTaskStep, wo
 	if err != nil {
 		return -1, err
 	}
-	envSlice := envMapToSlice(stepEnv)
+	envSlice := envMapToSlice(applyContainerEnvDefaults(stepEnv))
 	maskedLog := func(message string) error {
 		if logFn == nil {
 			return nil
@@ -1735,6 +2485,16 @@ func (s *Service) markPipelineFinished(ctx context.Context, pipelineID int64, st
 		}
 		if strings.TrimSpace(message) != "" {
 			update["message"] = message
+		}
+		if status == model.StatusFailure && strings.TrimSpace(message) != "" {
+			errorsJSON, err := json.Marshal([]*model.PipelineError{{
+				Type:    model.PipelineErrorTypeGeneric,
+				Message: message,
+			}})
+			if err != nil {
+				return err
+			}
+			update["errors"] = string(errorsJSON)
 		}
 		if err := tx.WithContext(ctx).
 			Model(&model.Pipeline{}).
@@ -1899,6 +2659,107 @@ func envMapFromOS() map[string]string {
 	return env
 }
 
+// hostOnlyEnvKeys 是默认要从 docker container env 里剥掉的 key 集合: 都是宿主机
+// 进程会带、但容器里要么路径不存在要么会引发奇怪 bug 的 env. 用户在 step.env /
+// pipelineEnv / 凭证里显式覆盖的同名 key 会在 stepEnv 里盖住, 不受这里影响.
+//
+//   - TMPDIR / TMP / TEMP : 宿主机临时目录, 容器里 stat 失败 (BuildKit 直接挂)
+//   - HOME / PWD / OLDPWD : 宿主用户目录, git/cargo/npm 都会被带跑偏
+//   - PATH                : 宿主路径在容器里 ENOENT, 容器自己的默认 PATH 已够用
+//   - USER / LOGNAME / SHELL : 容器里身份不一样, 强行给会触发部分工具检查失败
+//   - LANG                : 容器 locale 通常没装这些, 输出乱码 / warn
+//   - 各种 macOS / launchd 内部前缀: __CF*, Apple_*, XPC_*, COMMAND_MODE,
+//     SSH_AUTH_SOCK, TERM_PROGRAM*, TERM_SESSION_*, _, "0" 等
+var hostOnlyEnvKeys = map[string]struct{}{
+	"TMPDIR": {}, "TMP": {}, "TEMP": {},
+	"HOME": {}, "PWD": {}, "OLDPWD": {},
+	"PATH":         {},
+	"USER":         {},
+	"LOGNAME":      {},
+	"SHELL":        {},
+	"LANG":         {},
+	"COMMAND_MODE": {},
+	"SSH_AUTH_SOCK": {},
+	"_":             {},
+	"0":             {},
+}
+
+// hostOnlyEnvPrefixes 是按前缀匹配剥掉的 env, 主要是 macOS / locale / terminal
+// 相关内部 env, 容器里完全用不上.
+var hostOnlyEnvPrefixes = []string{
+	"LC_",
+	"XPC_",
+	"__CF",
+	"Apple_",
+	"TERM_PROGRAM",
+	"TERM_SESSION_",
+}
+
+// gitSafeDirectoryEnv 返回 git 官方支持的进程级 config 注入: 把 safe.directory=*
+// 设到容器 env 里, 让 step 容器内的 git (典型的 alpine/git clone step) 不再因为
+// host bind mount 透传宿主 UID 跟容器 root UID 不一致而拒绝操作 (CVE-2022-24765
+// 加固).
+//
+// 这条 env 只对 git 有效, 其它工具忽略, 安全且自包含: 不动用户的 ~/.gitconfig,
+// 不依赖 image 内置 git 配置, 不污染任何持久状态.
+//
+// 文档: https://git-scm.com/docs/git-config#ENVIRONMENT (GIT_CONFIG_COUNT / KEY / VALUE).
+func gitSafeDirectoryEnv() map[string]string {
+	return map[string]string{
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "safe.directory",
+		"GIT_CONFIG_VALUE_0": "*",
+	}
+}
+
+// applyContainerEnvDefaults 在 containerSafeEnv 剥完宿主专属 env 之后, 再补上
+// 引擎需要默认注入的 env (目前只有 git safe.directory). 拆出来是为了让三处
+// 容器入口共用同一份默认值. 用户在 step.env / pipelineEnv 显式覆盖的同名 key
+// 会保留原值, 不被默认值盖.
+func applyContainerEnvDefaults(env map[string]string) map[string]string {
+	out := containerSafeEnv(env)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for k, v := range gitSafeDirectoryEnv() {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// containerSafeEnv 返回一份过滤过的副本, 把 hostOnlyEnvKeys / hostOnlyEnvPrefixes
+// 命中的 key 都剥掉, 给 docker container 用. 调用方需要手动把容器需要的 env
+// (DOCKER_CONFIG / TMPDIR=/tmp 等) 显式塞回去.
+func containerSafeEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return env
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		trimmed := strings.TrimSpace(k)
+		if trimmed == "" {
+			continue
+		}
+		if _, drop := hostOnlyEnvKeys[trimmed]; drop {
+			continue
+		}
+		skip := false
+		for _, p := range hostOnlyEnvPrefixes {
+			if strings.HasPrefix(trimmed, p) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 func envMapToSlice(env map[string]string) []string {
 	if len(env) == 0 {
 		return nil
@@ -1976,6 +2837,58 @@ func provideRepoEnv(ctx *pipelineEnvContext) map[string]string {
 		"REPO_OWNER":          repo.Owner,
 	}
 	return env
+}
+
+// BuildRepoRenderContext 给「模板渲染前」提供已知的 repo + 触发参数变量,
+// 让 ${CI_REPO_FULL_NAME / REPO_CLONE_URL_AUTH / CI_PIPELINE_BRANCH ...}
+// 这种占位符在 source=template 流程下能被解析成项目实际值, 而不是
+// 落空 -> ""。pipeline.ID / pipeline.Number / pipeline_name 在 CreatePipeline
+// 之前未知, 这里不输出; 用户若想在 commands 字符串里用, 可依赖执行器
+// 后续 provideXxxEnv 注入的 env vars.
+//
+// settings 可空 (代表使用默认 repo 设置), 仅用于 buildCertificateEnv 拿
+// REPO_CLONE_URL_AUTH 的认证 URL.
+//
+// 暴露成 public 方法是为了让路由层 /pipeline-templates/:id/render 在拿到
+// 项目 repo_id 时也能给预览接口注入同一份上下文, 保证预览结果与真实
+// 触发完全一致.
+func (s *Service) BuildRepoRenderContext(ctx context.Context, repo *model.Repo, settings *model.RepoPipelineConfig, branch, commit, author string) map[string]string {
+	if repo == nil {
+		return map[string]string{}
+	}
+	cloneURL := strings.TrimSpace(repo.Clone)
+	if cloneURL == "" {
+		cloneURL = strings.TrimSpace(repo.ForgeURL)
+	}
+	cloneAuth := cloneURL
+	// 复用 buildCertificateEnv: 第三参数 nil 表示返回 settings.LegacyCertificates
+	// 全集; 我们只关心其副产物 cloneOverride (带凭证的 clone URL).
+	if s != nil && repo.ID > 0 && settings != nil {
+		if _, override, _ := s.buildCertificateEnv(ctx, repo, settings, nil); strings.TrimSpace(override) != "" {
+			cloneAuth = override
+		}
+	}
+	out := map[string]string{
+		"CI":                  "true",
+		"CI_REPO_ID":          fmt.Sprintf("%d", repo.ID),
+		"CI_REPO_NAME":        repo.Name,
+		"CI_REPO_OWNER":       repo.Owner,
+		"CI_REPO_FULL_NAME":   repo.FullName,
+		"CI_DEFAULT_BRANCH":   repo.Branch,
+		"CI_PIPELINE_BRANCH":  branch,
+		"CI_COMMIT_BRANCH":    branch,
+		"CI_PIPELINE_AUTHOR":  author,
+		"CI_COMMIT_SHA":       commit,
+		"COMMIT_ID":           commit,
+		"COMMIT_ID_SHA":       commit,
+		"REPO_URL":            cloneURL,
+		"REPO_CLONE_URL":      cloneURL,
+		"REPO_CLONE_URL_AUTH": cloneAuth,
+		"REPO_WEB_URL":        repo.ForgeURL,
+		"REPO_OWNER":          repo.Owner,
+		"BRANCH":              branch,
+	}
+	return out
 }
 
 func collectRequestedAliases(steps []pipelineTaskStep) map[string]string {
@@ -2182,10 +3095,38 @@ func sanitizeDirName(name string) string {
 	return result
 }
 
+// defaultWorkspaceRoot 决定控制进程在没显式 payload.WorkspaceRoot / 没设
+// PIPELINE_WORKSPACE_ROOT env 时的兜底路径.
+//
+// 走 ${HOME}/.devsys-workspace 而不是 /tmp/...: macOS 下 Colima 只默认共享
+// $HOME 与 /tmp/colima, 不含 /tmp 自身. Docker Desktop / OrbStack 默认共享
+// /Users 全树. ${HOME}/... 是三家 runtime 默认 file-sharing 列表里都包含的
+// 最大公约数, Mac 控制进程和 Linux VM docker daemon 看的是同一份 fs, bind
+// mount 的内容双向都见, 不会出现 BuildKit 看不到 controller 写入的 Dockerfile
+// 这种问题.
+//
+// 容器化部署 (devsys 跑在自己的镜像里): 镜像在 ENV 里把 PIPELINE_WORKSPACE_ROOT
+// 显式置成 /var/lib/devsys-workspace, 让用户用 host volume 挂同名路径即可.
+func defaultWorkspaceRoot() string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".devsys-workspace")
+	}
+	// 拿不到 home (极少数, 例如裸 root 进程没有 HOME env): 退回到平台安全路径.
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.TempDir(), "devsys-workspace")
+	}
+	return "/var/lib/devsys-workspace"
+}
+
 func sanitizeWorkspaceRoot(root string) string {
 	trimmed := strings.TrimSpace(root)
 	if trimmed == "" {
-		return filepath.Join(os.TempDir(), "go-devops-workspace")
+		if env := strings.TrimSpace(os.Getenv("PIPELINE_WORKSPACE_ROOT")); env != "" {
+			trimmed = env
+		}
+	}
+	if trimmed == "" {
+		return defaultWorkspaceRoot()
 	}
 	cleaned := filepath.Clean(trimmed)
 	if !filepath.IsAbs(cleaned) {
@@ -2290,6 +3231,210 @@ func buildPluginEnv(step pipelineTaskStep) map[string]string {
 		env[envKey] = strings.Join(values, "\n")
 	}
 	return env
+}
+
+// findUnresolvedPlaceholders 扫描 env value 里残留的 ${...} 字面量, 返回
+// "envKey=${placeholder}" 形式的列表, 已去重并排序便于错误消息稳定.
+// 用于 plugin 步骤运行前的 fail-fast 校验; commands 不走这条路径 (允许 shell 用 ${VAR}).
+func findUnresolvedPlaceholders(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		matches := unresolvedPlaceholderRegex.FindAllString(env[key], -1)
+		for _, m := range matches {
+			label := fmt.Sprintf("%s=%s", key, m)
+			if _, dup := seen[label]; dup {
+				continue
+			}
+			seen[label] = struct{}{}
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+// extractCertAliasesFromString 抓出字符串里所有 ${name.xxx...} 占位符的首段 name.
+// 用于自动发现 step settings/env 里隐式引用的凭证名.
+func extractCertAliasesFromString(s string) []string {
+	if s == "" {
+		return nil
+	}
+	matches := dottedSecretPlaceholderRegex.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
+// extractCertAliasesFromStep 综合扫 step.Plugin.Settings 与 step.Env 的所有 value.
+func extractCertAliasesFromStep(step pipelineTaskStep) []string {
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		seen[name] = struct{}{}
+	}
+	if step.Plugin != nil {
+		for _, values := range step.Plugin.Settings {
+			for _, v := range values {
+				for _, n := range extractCertAliasesFromString(v) {
+					add(n)
+				}
+			}
+		}
+	}
+	for _, v := range step.Env {
+		for _, n := range extractCertAliasesFromString(v) {
+			add(n)
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// discoverCertAliasesFromSettings 把 step.Plugin.Settings / step.Env 里隐式引用的
+// 凭证名补到 step.Secrets, 减少模板编写者忘写 certificate: 字段时的 401 噩梦.
+// 仅当 systemSvc 能查到同名凭证才追加, 避免把误写的普通变量名 ($MY_VAR.x) 当凭证.
+// 结果会去重, 与已有 secrets 大小写不敏感比较.
+func (s *Service) discoverCertAliasesFromSettings(ctx context.Context, steps []pipelineTaskStep) {
+	if s == nil || s.systemSvc == nil || len(steps) == 0 {
+		return
+	}
+	exists := map[string]bool{}
+	for i := range steps {
+		candidates := extractCertAliasesFromStep(steps[i])
+		if len(candidates) == 0 {
+			continue
+		}
+		existing := map[string]struct{}{}
+		for _, alias := range steps[i].Secrets {
+			existing[strings.ToLower(strings.TrimSpace(alias))] = struct{}{}
+		}
+		for _, name := range candidates {
+			key := strings.ToLower(name)
+			if _, ok := existing[key]; ok {
+				continue
+			}
+			ok, cached := exists[key]
+			if !cached {
+				cert, err := s.systemSvc.GetCertificateByName(ctx, name)
+				ok = err == nil && cert != nil
+				exists[key] = ok
+			}
+			if !ok {
+				continue
+			}
+			steps[i].Secrets = append(steps[i].Secrets, name)
+			existing[key] = struct{}{}
+		}
+	}
+}
+
+// normalizeDockerRepo 去掉 docker registry URL 上常见的 http(s):// 前缀和尾部 /,
+// docker login / push 都不接受这类形式, 但用户在凭证管理填值时很容易顺手粘进去.
+func normalizeDockerRepo(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return s
+	}
+	for _, prefix := range []string{"https://", "http://"} {
+		if strings.HasPrefix(strings.ToLower(s), prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	s = strings.TrimRight(s, "/")
+	return s
+}
+
+// isDockerPluginImage 简单匹配常见的 docker registry 推送插件镜像名,
+// 用于决定是否走 PLUGIN_USERNAME/PASSWORD/REGISTRY 自动注入.
+func isDockerPluginImage(image string) bool {
+	img := strings.ToLower(strings.TrimSpace(image))
+	if img == "" {
+		return false
+	}
+	if idx := strings.Index(img, ":"); idx > 0 {
+		img = img[:idx]
+	}
+	switch {
+	case strings.HasPrefix(img, "woodpeckerci/plugin-docker"):
+		return true
+	case strings.HasPrefix(img, "plugins/docker"):
+		return true
+	case strings.Contains(img, "docker-buildx"):
+		return true
+	}
+	return false
+}
+
+// autofillDockerPluginEnv 在 step 用 docker registry 推送插件且声明了 docker 凭证的
+// 场景下, 把 PLUGIN_USERNAME/PLUGIN_PASSWORD/PLUGIN_REGISTRY 自动从凭证里填上,
+// 让用户的 settings: 只需写 repo / dockerfile / tags 即可. 已显式提供的 PLUGIN_* 不覆盖.
+// 仅消费第一个 docker 类型 binding (按 alias 字典序), 多 docker 凭证场景仍可显式 ${alias.docker.*} 指明.
+func autofillDockerPluginEnv(pluginEnv map[string]string, stepSecrets map[string]resolvedSecretBinding) {
+	if pluginEnv == nil || len(stepSecrets) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(stepSecrets))
+	for k, b := range stepSecrets {
+		if strings.ToLower(strings.TrimSpace(b.Type)) == "docker" {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	sort.Strings(keys)
+	binding := stepSecrets[keys[0]]
+	set := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if existing, ok := pluginEnv[key]; ok {
+			trimmed := strings.TrimSpace(existing)
+			// 把残留 ${...} 字面量也视作"未提供", 用凭证值覆盖.
+			if trimmed != "" && !unresolvedPlaceholderRegex.MatchString(trimmed) {
+				return
+			}
+		}
+		pluginEnv[key] = value
+	}
+	set("PLUGIN_USERNAME", binding.Values["docker.username"])
+	set("PLUGIN_PASSWORD", binding.Values["docker.password"])
+	set("PLUGIN_REGISTRY", binding.Values["docker.registry"])
 }
 
 func applySecretPlaceholdersToMap(values map[string]string, bindings map[string]resolvedSecretBinding) map[string]string {
@@ -2439,6 +3584,280 @@ func commandContainerName(step pipelineTaskStep, env map[string]string, index in
 	return sanitizeContainerName(base)
 }
 
+// runBuildStep 跑一个 kind=build 步骤. 在容器内启 moby/buildkit 的 daemonless
+// 模式 (buildctl-daemonless.sh build ...) 拉 Dockerfile 推镜像, 不需要 dockerd.
+//
+// 流程:
+//  1. registry/username/password 解析: 显式 build.* 优先, 否则从 stepSecrets 找
+//     首个 type=docker 的凭证回填. 任一缺失则 fail-fast 给出清晰提示.
+//  2. 在 host 侧 workspace_root/.devsys-buildkit/<step_name>/ 写一份临时
+//     ~/.docker/config.json (含 base64(user:pass) 的 auths.<registry>), step
+//     结束时 RemoveAll. 文件 mode 0600.
+//  3. 拼 buildctl 参数: --frontend dockerfile.v0 --local context=/workspace/<ctx>
+//     --local dockerfile=<dockerfile_dir> --opt filename=<dockerfile_basename>
+//     --opt platform=<csv> --opt build-arg:K=V... --opt target=... --opt no-cache=true
+//     --output type=image,name=<reg>/<repo>:<tag1>,name=...,push=true|false.
+//  4. dockerruntime 启动: rootless 模式加 SecurityOpt (seccomp/apparmor/systempaths
+//     unconfined), :latest 模式给 Privileged. DOCKER_CONFIG 指向 mount 进容器
+//     的 .devsys-buildkit/<step>/ 目录.
+func (s *Service) runBuildStep(ctx context.Context, step pipelineTaskStep, stepEnv map[string]string, workspace string, stepSecrets map[string]resolvedSecretBinding, ensureDockerfile func(bool, func(string) error) error, logFn func(string) error) (int, error) {
+	build := step.Build
+	if build == nil {
+		return -1, fmt.Errorf("build configuration missing")
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return -1, fmt.Errorf("workspace not prepared")
+	}
+	if ensureDockerfile != nil {
+		if err := ensureDockerfile(true, logFn); err != nil {
+			return -1, err
+		}
+		defer ensureDockerfile(false, logFn)
+	}
+
+	registry, username, password, err := resolveBuildRegistryCredentials(step.Name, build, stepSecrets)
+	if err != nil {
+		return -1, err
+	}
+
+	// 写临时 docker config.json. 路径放在 workspace 子目录里, 结束时清理.
+	configHostDir := filepath.Join(workspace, ".devsys-buildkit", sanitizeContainerName(step.Name))
+	if err := os.MkdirAll(configHostDir, 0o700); err != nil {
+		return -1, fmt.Errorf("准备 buildkit 工作目录失败: %w", err)
+	}
+	defer os.RemoveAll(filepath.Join(workspace, ".devsys-buildkit"))
+
+	authJSON, err := buildDockerAuthConfigJSON(registry, username, password)
+	if err != nil {
+		return -1, err
+	}
+	configHostPath := filepath.Join(configHostDir, "config.json")
+	if err := os.WriteFile(configHostPath, authJSON, 0o600); err != nil {
+		return -1, fmt.Errorf("写入 docker config 失败: %w", err)
+	}
+
+	containerWorkspace := "/workspace"
+	relConfigDir := strings.TrimPrefix(configHostDir, workspace)
+	relConfigDir = strings.TrimPrefix(relConfigDir, string(filepath.Separator))
+	containerConfigDir := path.Join(containerWorkspace, filepath.ToSlash(relConfigDir))
+
+	args := buildBuildctlArgs(build, registry, containerWorkspace)
+
+	// 运行模式由镜像名 + 显式 build.Privileged 共同决定:
+	//   - 镜像名含 "rootless" 且 build.Privileged 未强制 true → rootless 模式
+	//     (Docker 不加 --privileged, 加少量必要的 SecurityOpt).
+	//   - 否则 → privileged 模式 (Docker --privileged, 不动 SecurityOpt).
+	// 默认镜像 moby/buildkit:latest 自动落到 privileged 分支, 兼容所有 Docker daemon.
+	imageLower := strings.ToLower(step.Image)
+	rootlessImage := strings.Contains(imageLower, "rootless")
+	usePrivileged := build.Privileged || !rootlessImage
+
+	if logFn != nil {
+		_ = logFn(fmt.Sprintf("BuildKit registry=%s repo=%s tags=%v platforms=%v push=%v mode=%s",
+			registry, build.Repo, build.Tags, build.Platforms, buildPushEnabled(build),
+			privilegedModeLabel(usePrivileged)))
+	}
+
+	// 先剥宿主机专属 env (TMPDIR/HOME/PATH 等), 再回填 BuildKit / docker login
+	// 需要的几个 key. 否则宿主 macOS 的 TMPDIR=/var/folders/... 会被 BuildKit
+	// os.MkdirTemp(os.TempDir(), ...) 当作 Linux 容器里的路径去 stat, 直接挂掉.
+	// applyContainerEnvDefaults 同时会注入 git safe.directory=*, 不影响 BuildKit.
+	containerEnv := applyContainerEnvDefaults(pluginContainerEnv(stepEnv))
+	containerEnv["DOCKER_CONFIG"] = containerConfigDir
+	if _, ok := containerEnv["TMPDIR"]; !ok {
+		containerEnv["TMPDIR"] = "/tmp"
+	}
+	if _, ok := containerEnv["HOME"]; !ok {
+		containerEnv["HOME"] = "/tmp"
+	}
+	// rootless 模式默认禁用 process sandbox, 节省启动时间且与常见 CI 容器内核兼容.
+	if !usePrivileged {
+		if _, ok := containerEnv["BUILDKITD_FLAGS"]; !ok {
+			containerEnv["BUILDKITD_FLAGS"] = "--oci-worker-no-process-sandbox"
+		}
+	}
+
+	cfg := dockerruntime.ContainerConfig{
+		Name:       pluginContainerName(step, stepEnv),
+		Image:      step.Image,
+		Entrypoint: []string{"buildctl-daemonless.sh"},
+		Cmd:        args,
+		Env:        envMapToSlice(containerEnv),
+		WorkingDir: containerWorkspace,
+		Volumes:    map[string]struct{}{containerWorkspace: {}},
+		Binds:      []string{fmt.Sprintf("%s:%s", workspace, containerWorkspace)},
+		Privileged: usePrivileged,
+	}
+	if !usePrivileged {
+		// 故意不带 systempaths=unconfined: Docker Engine 20.10+ Linux 才接受,
+		// Colima / Docker Desktop / 旧 Docker 都会以 "invalid --security-opt"
+		// 拒收, 让容器根本起不来. 缺它在某些环境 rootless buildkitd 启动会受限,
+		// 那时再 fallback 到 privileged (默认行为).
+		cfg.SecurityOpt = []string{
+			"seccomp=unconfined",
+			"apparmor=unconfined",
+		}
+	}
+	runner, err := s.dockerRunner()
+	if err != nil {
+		return -1, err
+	}
+	return runner.Run(ctx, cfg, logFn)
+}
+
+func privilegedModeLabel(privileged bool) string {
+	if privileged {
+		return "privileged"
+	}
+	return "rootless"
+}
+
+func buildPushEnabled(b *pipelineBuildConfig) bool {
+	if b == nil || b.Push == nil {
+		return true
+	}
+	return *b.Push
+}
+
+// resolveBuildRegistryCredentials 拼出 docker registry 推送所需的 (registry,
+// username, password). 显式 build.* 字段优先, 否则从 stepSecrets 找首个 type=docker
+// 凭证回填. 三件套缺一不可, 否则 fail-fast.
+func resolveBuildRegistryCredentials(stepName string, build *pipelineBuildConfig, stepSecrets map[string]resolvedSecretBinding) (string, string, string, error) {
+	registry := normalizeDockerRepo(build.Registry)
+	username := strings.TrimSpace(build.Username)
+	password := build.Password
+
+	if registry == "" || username == "" || password == "" {
+		// 找首个 docker 凭证 (按 alias key 字典序确保稳定)
+		keys := make([]string, 0, len(stepSecrets))
+		for k, b := range stepSecrets {
+			if strings.ToLower(strings.TrimSpace(b.Type)) == "docker" {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			b := stepSecrets[keys[0]]
+			if registry == "" {
+				registry = normalizeDockerRepo(b.Values["docker.registry"])
+				if registry == "" {
+					registry = normalizeDockerRepo(b.Values["docker.repo"])
+				}
+			}
+			if username == "" {
+				username = b.Values["docker.username"]
+			}
+			if password == "" {
+				password = b.Values["docker.password"]
+			}
+		}
+	}
+
+	missing := make([]string, 0, 3)
+	if registry == "" {
+		missing = append(missing, "registry")
+	}
+	if username == "" {
+		missing = append(missing, "username")
+	}
+	if password == "" {
+		missing = append(missing, "password")
+	}
+	if len(missing) > 0 {
+		return "", "", "", fmt.Errorf("kind=build 步骤 %q 缺少 %v: 请在 build.* 显式设置, 或在 step 上声明 certificate: <docker_cert>", stepName, missing)
+	}
+	return registry, username, password, nil
+}
+
+// buildDockerAuthConfigJSON 渲染 ~/.docker/config.json. buildctl 会用它鉴权
+// registry 推送; 字段格式与 docker CLI 写出来的一致.
+func buildDockerAuthConfigJSON(registry, username, password string) ([]byte, error) {
+	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	cfg := map[string]any{
+		"auths": map[string]any{
+			registry: map[string]any{
+				"auth":     auth,
+				"username": username,
+				"password": password,
+			},
+		},
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 docker config 失败: %w", err)
+	}
+	return out, nil
+}
+
+// buildBuildctlArgs 把 pipelineBuildConfig 转成 buildctl 命令行参数.
+// containerWorkspace 是容器内 workspace 挂载点, 用于拼 --local 路径.
+func buildBuildctlArgs(b *pipelineBuildConfig, registry, containerWorkspace string) []string {
+	contextRel := strings.TrimSpace(b.Context)
+	if contextRel == "" {
+		contextRel = "."
+	}
+	contextPath := path.Join(containerWorkspace, filepath.ToSlash(contextRel))
+
+	dockerfileRel := strings.TrimSpace(b.Dockerfile)
+	if dockerfileRel == "" {
+		dockerfileRel = "Dockerfile"
+	}
+	dockerfileBase := path.Base(filepath.ToSlash(dockerfileRel))
+	dockerfileDirRel := path.Dir(filepath.ToSlash(dockerfileRel))
+	if dockerfileDirRel == "" || dockerfileDirRel == "." {
+		dockerfileDirRel = contextRel
+	}
+	dockerfilePath := path.Join(containerWorkspace, dockerfileDirRel)
+
+	args := []string{
+		"build",
+		"--frontend", "dockerfile.v0",
+		"--local", "context=" + contextPath,
+		"--local", "dockerfile=" + dockerfilePath,
+		"--opt", "filename=" + dockerfileBase,
+	}
+
+	if len(b.Platforms) > 0 {
+		args = append(args, "--opt", "platform="+strings.Join(b.Platforms, ","))
+	}
+
+	// 稳定顺序, 便于复现/对比日志.
+	if len(b.BuildArgs) > 0 {
+		keys := make([]string, 0, len(b.BuildArgs))
+		for k := range b.BuildArgs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--opt", "build-arg:"+k+"="+b.BuildArgs[k])
+		}
+	}
+	if strings.TrimSpace(b.Target) != "" {
+		args = append(args, "--opt", "target="+strings.TrimSpace(b.Target))
+	}
+	if b.NoCache {
+		args = append(args, "--opt", "no-cache=true")
+	}
+
+	tags := b.Tags
+	if len(tags) == 0 {
+		tags = []string{"latest"}
+	}
+	output := strings.Builder{}
+	output.WriteString("type=image")
+	for _, tag := range tags {
+		output.WriteString(",name=")
+		output.WriteString(registry + "/" + b.Repo + ":" + tag)
+	}
+	if buildPushEnabled(b) {
+		output.WriteString(",push=true")
+	} else {
+		output.WriteString(",push=false")
+	}
+	args = append(args, "--output", output.String())
+	return args
+}
+
 func (s *Service) runPluginStep(ctx context.Context, step pipelineTaskStep, stepEnv map[string]string, workspace string, pluginCfg *pipelinePluginConfig, ensureDockerfile func(bool, func(string) error) error, logFn func(string) error) (int, error) {
 	if pluginCfg == nil {
 		return -1, fmt.Errorf("plugin configuration missing")
@@ -2465,7 +3884,7 @@ func (s *Service) runPluginStep(ctx context.Context, step pipelineTaskStep, step
 	cfg := dockerruntime.ContainerConfig{
 		Name:       pluginContainerName(step, stepEnv),
 		Image:      step.Image,
-		Env:        envMapToSlice(pluginContainerEnv(stepEnv)),
+		Env:        envMapToSlice(applyContainerEnvDefaults(pluginContainerEnv(stepEnv))),
 		WorkingDir: "/workspace",
 		Volumes:    map[string]struct{}{"/workspace": {}},
 		Binds:      binds,
@@ -2767,6 +4186,7 @@ func (s *Service) markPipelineBlocked(ctx context.Context, pipelineID int64, mes
 
 func defaultPipelineSettings() *model.RepoPipelineConfig {
 	return &model.RepoPipelineConfig{
+		Source:           model.PipelineConfigSourceInline,
 		CleanupEnabled:   false,
 		RetentionDays:    7,
 		MaxRecords:       10,
@@ -2787,6 +4207,29 @@ func normalizePipelineConfig(cfg *model.RepoPipelineConfig) *model.RepoPipelineC
 		if legacy := strings.TrimSpace(cfg.LegacyCronSpec); legacy != "" {
 			cfg.CronSchedules = []string{legacy}
 		}
+	}
+	// Source 字段在旧数据上可能为空, 强制回填为 inline 以便业务逻辑统一判断.
+	if cfg.Source == "" {
+		cfg.Source = model.PipelineConfigSourceInline
+	}
+	switch cfg.Source {
+	case model.PipelineConfigSourceTemplate:
+		// 模板模式: 清空 compose 残留, 保证 TemplateVariables 至少是空 map
+		// 让前端表单不需要做 nil 判断.
+		cfg.ComposeSteps = nil
+		if cfg.TemplateVariables == nil {
+			cfg.TemplateVariables = map[string]string{}
+		}
+	case model.PipelineConfigSourceCompose:
+		cfg.TemplateID = nil
+		cfg.TemplateVariables = nil
+		if cfg.ComposeSteps == nil {
+			cfg.ComposeSteps = []model.ComposeStepRef{}
+		}
+	default: // inline (含 "")
+		cfg.TemplateID = nil
+		cfg.TemplateVariables = nil
+		cfg.ComposeSteps = nil
 	}
 	return cfg
 }
@@ -2834,7 +4277,119 @@ func (s *Service) reloadCronSchedules(ctx context.Context) error {
 		}
 	}
 
+	return s.reloadJobCronSchedules(ctx)
+}
+
+// reloadJobCronSchedules 加载所有 PipelineJob.cron_schedules 到 scheduler.
+// 与 reloadCronSchedules 同语义: 已注册但 DB 已删除的 jobID 也会被清理.
+func (s *Service) reloadJobCronSchedules(ctx context.Context) error {
+	type jobCronRecord struct {
+		JobID         int64    `gorm:"column:id"`
+		CronSchedules []string `gorm:"column:cron_schedules;serializer:json"`
+	}
+	var records []jobCronRecord
+	if err := s.db.View(func(tx *gorm.DB) error {
+		return tx.WithContext(ctx).
+			Model(&model.PipelineJob{}).
+			Select("id", "cron_schedules").
+			Find(&records).Error
+	}); err != nil {
+		return err
+	}
+
+	seen := make(map[int64]struct{}, len(records))
+	for _, record := range records {
+		schedules := sanitizeCronSchedules(record.CronSchedules)
+		s.RefreshJobCronEntries(record.JobID, schedules)
+		seen[record.JobID] = struct{}{}
+	}
+
+	s.cronMu.Lock()
+	existing := make([]int64, 0, len(s.jobCronEntries))
+	for jobID := range s.jobCronEntries {
+		existing = append(existing, jobID)
+	}
+	s.cronMu.Unlock()
+	for _, jobID := range existing {
+		if _, ok := seen[jobID]; !ok {
+			s.RefreshJobCronEntries(jobID, nil)
+		}
+	}
 	return nil
+}
+
+// SetJobScheduler 注入 Job 调度器实现. 在 services.go 装配 jobSvc 之后调用,
+// 让 cron 触发 Job 时能回调到 job 服务. 之前未注入时, 任何 Job cron entry
+// 触发都会被 runScheduledJobPipeline 直接忽略并打 warning, 不会 panic.
+func (s *Service) SetJobScheduler(scheduler JobScheduler) {
+	s.cronMu.Lock()
+	s.jobScheduler = scheduler
+	s.cronMu.Unlock()
+}
+
+// RefreshJobCronEntries 与 refreshCronEntries 同结构, 只是按 jobID 维护 entries
+// 并在 cron 触发时调 runScheduledJobPipeline. 由 Job 服务在 Create / Update /
+// Delete 后显式调用; 启动时也由 reloadCronSchedules 一次性装载.
+func (s *Service) RefreshJobCronEntries(jobID int64, schedules []string) {
+	s.cronMu.Lock()
+	defer s.cronMu.Unlock()
+
+	if s.scheduler == nil {
+		return
+	}
+
+	if ids, ok := s.jobCronEntries[jobID]; ok {
+		for _, id := range ids {
+			s.scheduler.Remove(id)
+		}
+		delete(s.jobCronEntries, jobID)
+	}
+
+	sanitized := sanitizeCronSchedules(schedules)
+	if len(sanitized) == 0 {
+		return
+	}
+
+	for _, spec := range sanitized {
+		specCopy := spec
+		entryID, err := s.scheduler.Add(specCopy, func() {
+			s.runScheduledJobPipeline(jobID, specCopy)
+		})
+		if err != nil {
+			log.Warn().Err(err).Int64("job_id", jobID).Str("cron_expression", specCopy).Msg("skipping invalid cron expression")
+			continue
+		}
+		s.jobCronEntries[jobID] = append(s.jobCronEntries[jobID], entryID)
+		log.Debug().Int64("job_id", jobID).Str("cron_expression", specCopy).Msg("registered cron job schedule")
+	}
+}
+
+// runScheduledJobPipeline 将 Job cron 触发转发给 jobScheduler 实现. 与
+// runScheduledPipeline 对仗, 但 Job 的实际构造逻辑放在 job 包以避免
+// pipeline → job 直接耦合.
+func (s *Service) runScheduledJobPipeline(jobID int64, expression string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Int64("job_id", jobID).Str("cron_expression", expression).Msg("cron job panicked")
+		}
+	}()
+
+	s.cronMu.Lock()
+	scheduler := s.jobScheduler
+	s.cronMu.Unlock()
+	if scheduler == nil {
+		log.Warn().Int64("job_id", jobID).Str("cron_expression", expression).Msg("job scheduler not configured, skipping cron tick")
+		return
+	}
+
+	ctx := context.Background()
+	log.Info().
+		Int64("job_id", jobID).
+		Str("cron_expression", expression).
+		Msg("triggering scheduled job")
+	if err := scheduler.TriggerCron(ctx, jobID, expression); err != nil {
+		log.Error().Err(err).Int64("job_id", jobID).Str("cron_expression", expression).Msg("failed to trigger cron job")
+	}
 }
 
 func (s *Service) refreshCronEntries(repoID int64, schedules []string) {
@@ -3282,14 +4837,15 @@ func (s *Service) buildCertificateEnv(ctx context.Context, repo *model.Repo, set
 						Msg("invalid docker certificate")
 					continue
 				}
+				dockerRepo := normalizeDockerRepo(dockerCert.Repo)
 				env[fmt.Sprintf("%s_USERNAME", sanitized)] = dockerCert.Username
 				env[fmt.Sprintf("%s_PASSWORD", sanitized)] = dockerCert.Password
-				env[fmt.Sprintf("%s_REPO", sanitized)] = dockerCert.Repo
+				env[fmt.Sprintf("%s_REPO", sanitized)] = dockerRepo
 
 				resolved.Values["docker.username"] = dockerCert.Username
 				resolved.Values["docker.password"] = dockerCert.Password
-				resolved.Values["docker.repo"] = dockerCert.Repo
-				resolved.Values["docker.registry"] = dockerCert.Repo
+				resolved.Values["docker.repo"] = dockerRepo
+				resolved.Values["docker.registry"] = dockerRepo
 			default:
 				log.Debug().
 					Int64("certificate_id", binding.CertificateID).
@@ -3378,14 +4934,15 @@ func (s *Service) buildCertificateEnv(ctx context.Context, repo *model.Repo, set
 						Msg("invalid global docker certificate")
 					continue
 				}
+				dockerRepo := normalizeDockerRepo(dockerCert.Repo)
 				env[fmt.Sprintf("%s_USERNAME", sanitized)] = dockerCert.Username
 				env[fmt.Sprintf("%s_PASSWORD", sanitized)] = dockerCert.Password
-				env[fmt.Sprintf("%s_REPO", sanitized)] = dockerCert.Repo
+				env[fmt.Sprintf("%s_REPO", sanitized)] = dockerRepo
 
 				resolved.Values["docker.username"] = dockerCert.Username
 				resolved.Values["docker.password"] = dockerCert.Password
-				resolved.Values["docker.repo"] = dockerCert.Repo
-				resolved.Values["docker.registry"] = dockerCert.Repo
+				resolved.Values["docker.repo"] = dockerRepo
+				resolved.Values["docker.registry"] = dockerRepo
 			default:
 				log.Debug().
 					Int64("certificate_id", cert.ID).
@@ -3405,14 +4962,26 @@ func (s *Service) buildCertificateEnv(ctx context.Context, repo *model.Repo, set
 
 // CancelPipelineRun stops an in-flight pipeline and marks it as killed.
 func (s *Service) CancelPipelineRun(ctx context.Context, repoID, pipelineID int64, reason string) error {
+	return s.cancelPipelineRun(ctx, model.PipelineOwnerRepo, repoID, pipelineID, reason)
+}
+
+// CancelJobPipelineRun 是 CancelPipelineRun 的 Job 变体, 按 job_id 鉴权.
+func (s *Service) CancelJobPipelineRun(ctx context.Context, jobID, pipelineID int64, reason string) error {
+	return s.cancelPipelineRun(ctx, model.PipelineOwnerJob, jobID, pipelineID, reason)
+}
+
+func (s *Service) cancelPipelineRun(ctx context.Context, ownerKind string, ownerID int64, pipelineID int64, reason string) error {
 	var pipeline model.Pipeline
 	err := s.db.View(func(tx *gorm.DB) error {
 		return tx.WithContext(ctx).
-			Where("id = ? AND repo_id = ?", pipelineID, repoID).
+			Where("id = ?", pipelineID).
 			Take(&pipeline).Error
 	})
 	if err != nil {
 		return err
+	}
+	if !pipelineOwnerMatches(&pipeline, ownerKind, ownerID) {
+		return gorm.ErrRecordNotFound
 	}
 
 	switch pipeline.Status {

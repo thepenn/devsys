@@ -1,0 +1,31 @@
+# =============================================================================
+# React 前端 (modules/web/) .gitignore
+#
+# 重要: package-lock.json 必须提交! 镜像构建走 npm ci, 没 lockfile 会失败.
+# =============================================================================
+
+# 依赖
+node_modules/
+
+# 构建产物 (Go 通过 //go:embed all:dist 嵌入二进制)
+# .gitkeep 占位文件单独保留, 让 web.go 在 dist 仅有占位时也能编译.
+dist/
+!dist/.gitkeep
+
+# CRA / webpack 缓存
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# 本地 env (REACT_APP_* 编译时变量, 一般放 .env.local)
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 测试 / coverage
+coverage/
+.nyc_output/
+
+# OS 兜底
+.DS_Store

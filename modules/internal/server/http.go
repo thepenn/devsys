@@ -35,8 +35,7 @@ func (s *HttpServer) ListenAndServe(ctx context.Context) error {
 
 func (s *HttpServer) listenAndServe(ctx context.Context) error {
 	if err := s.checkPortAvailable(); err != nil {
-		log.Error().Err(err).Str("addr", s.Addr).Msg("port is already in use")
-		panic(fmt.Sprintf("Port %s is already in use: %v", s.Addr, err))
+		return fmt.Errorf("port %s is already in use: %w", s.Addr, err)
 	}
 
 	var g errgroup.Group

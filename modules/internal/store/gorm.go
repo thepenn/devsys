@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -12,6 +13,14 @@ import (
 )
 
 func Connect(datasource string, maxOpenConnections int, showSql bool) (*DB, error) {
+	return ConnectWithDriver("mysql", datasource, maxOpenConnections, showSql)
+}
+
+func ConnectWithDriver(driver, datasource string, maxOpenConnections int, showSql bool) (*DB, error) {
+	if driver != "mysql" {
+		return nil, fmt.Errorf("unsupported database driver %q: only \"mysql\" is currently supported", driver)
+	}
+
 	sqlDB, err := sql.Open("mysql", datasource)
 	if err != nil {
 		return nil, err

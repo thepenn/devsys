@@ -1,6 +1,7 @@
 package routers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"gorm.io/gorm"
 
+	"github.com/thepenn/devsys/internal/label"
 	"github.com/thepenn/devsys/model"
 	authmw "github.com/thepenn/devsys/routers/middleware/auth"
 	"github.com/thepenn/devsys/service"
@@ -31,12 +33,23 @@ type repoListResponse struct {
 }
 
 type pipelineConfigResponse struct {
-	Content   string `json:"content"`
-	UpdatedAt int64  `json:"updated_at"`
+	Source            string                 `json:"source"`
+	Content           string                 `json:"content"`
+	TemplateID        *int64                 `json:"template_id,omitempty"`
+	TemplateName      string                 `json:"template_name,omitempty"`
+	TemplateDisplay   string                 `json:"template_display_name,omitempty"`
+	TemplatePublished bool                   `json:"template_published,omitempty"`
+	TemplateVariables map[string]string      `json:"template_variables,omitempty"`
+	ComposeSteps      []model.ComposeStepRef `json:"compose_steps,omitempty"`
+	UpdatedAt         int64                  `json:"updated_at"`
 }
 
 type pipelineConfigRequest struct {
-	Content string `json:"content"`
+	Source            string                 `json:"source"`
+	Content           string                 `json:"content"`
+	TemplateID        *int64                 `json:"template_id"`
+	TemplateVariables map[string]string      `json:"template_variables"`
+	ComposeSteps      []model.ComposeStepRef `json:"compose_steps"`
 }
 
 type pipelineRunRequest struct {
@@ -71,16 +84,20 @@ type pipelineRunDetailResponse struct {
 }
 
 type pipelineRunDetailPipeline struct {
-	ID       int64             `json:"id"`
-	Number   int64             `json:"number"`
-	Status   model.StatusValue `json:"status"`
-	Branch   string            `json:"branch"`
-	Commit   string            `json:"commit"`
-	Message  string            `json:"message"`
-	Author   string            `json:"author"`
-	Created  int64             `json:"created"`
-	Started  int64             `json:"started"`
-	Finished int64             `json:"finished"`
+	ID                  int64                  `json:"id"`
+	Number              int64                  `json:"number"`
+	Status              model.StatusValue      `json:"status"`
+	Event               string                 `json:"event,omitempty"`
+	Title               string                 `json:"title,omitempty"`
+	Branch              string                 `json:"branch"`
+	Commit              string                 `json:"commit"`
+	Message             string                 `json:"message"`
+	Author              string                 `json:"author"`
+	Created             int64                  `json:"created"`
+	Started             int64                  `json:"started"`
+	Finished            int64                  `json:"finished"`
+	AdditionalVariables map[string]string      `json:"additional_variables,omitempty"`
+	Errors              []*model.PipelineError `json:"errors,omitempty"`
 }
 
 type pipelineWorkflowResponse struct {
@@ -147,9 +164,16 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws := register("/repos")
 	ws.Filter(r.authMW.Authenticate)
 
+	read := []string{label.ProjectRead}
+	write := []string{label.ProjectWrite}
+	trigger := []string{label.PipelineTrigger}
+
 	ws.Route(ws.GET("").To(r.list).
 		Doc("List repositories accessible to the current user").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Writes(repoListResponse{}).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusOK, "repository list", repoListResponse{}).
@@ -158,6 +182,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.POST("/sync").To(r.sync).
 		Doc("Trigger synchronization of Git repositories for the current user").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusNoContent, "sync triggered", nil).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -166,6 +193,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.POST("/{repo_id}/sync").To(r.syncOne).
 		Doc("Synchronize a single repository by forge remote id").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusNoContent, "sync triggered", nil).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -175,6 +205,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.GET("/{repo_id}/pipeline/runs").To(r.listPipelineRuns).
 		Doc("List pipelines for repository").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusOK, "pipeline runs", pipelineRunListResponse{}).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -183,6 +216,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.GET("/{repo_id}/pipeline/runs/{pipeline_id}").To(r.getPipelineRun).
 		Doc("Get detailed information for a pipeline run").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusOK, "pipeline run", pipelineRunDetailResponse{}).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -192,6 +228,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.POST("/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/approval").To(r.submitPipelineApproval).
 		Doc("Submit an approval decision for a pipeline step").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, trigger).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
@@ -207,6 +246,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.GET("/{repo_id}/pipeline/config").To(r.getPipelineConfig).
 		Doc("Get pipeline configuration for repository").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusOK, "config", pipelineConfigResponse{}).
 		Returns(http.StatusNotFound, "not found", errorResponse{}).
@@ -216,6 +258,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.PUT("/{repo_id}/pipeline/config").To(r.updatePipelineConfig).
 		Doc("Create or update pipeline configuration for repository").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
@@ -228,6 +273,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.GET("/{repo_id}/pipeline/settings").To(r.getPipelineSettings).
 		Doc("Get pipeline settings for repository").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusOK, "settings", pipelineSettingsResponse{}).
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
@@ -237,6 +285,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.PUT("/{repo_id}/pipeline/settings").To(r.updatePipelineSettings).
 		Doc("Update pipeline settings for repository").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, write).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
@@ -249,6 +300,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.POST("/{repo_id}/pipeline/run").To(r.triggerPipeline).
 		Doc("Trigger a manual pipeline run").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, trigger).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Consumes(restful.MIME_JSON).
 		Produces(restful.MIME_JSON).
@@ -261,6 +315,9 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 	ws.Route(ws.POST("/{repo_id}/pipeline/runs/{pipeline_id}/cancel").To(r.cancelPipelineRun).
 		Doc("Cancel a running pipeline").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, trigger).
+		Metadata(label.MetaModule, label.ModuleProject).
 		Filter(r.authMW.RequireAuth).
 		Returns(http.StatusNoContent, "cancelled", nil).
 		Returns(http.StatusBadRequest, "invalid request", errorResponse{}).
@@ -454,11 +511,21 @@ func (r *repoRouter) getPipelineRun(req *restful.Request, resp *restful.Response
 		writeError(resp, http.StatusNotFound, errors.New("pipeline run not found"))
 		return
 	}
-	decorateApprovalPermissions(detail, claims.Login)
+
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineRunDetailResponse(detail, claims.Login))
+}
+
+// buildPipelineRunDetailResponse 把 service 层的 PipelineRunDetail 转换成
+// HTTP DTO. 抽出来 repo / job 两套路由复用, 也保证审批权限同样被装饰.
+func buildPipelineRunDetailResponse(detail *pipelinesvc.PipelineRunDetail, login string) pipelineRunDetailResponse {
+	if detail == nil || detail.Pipeline == nil {
+		return pipelineRunDetailResponse{}
+	}
+	decorateApprovalPermissions(detail, login)
 
 	stepMap := make(map[int][]pipelineStepResponse)
 	for _, step := range detail.Steps {
-		decorateApprovalForUser(step, claims.Login)
+		decorateApprovalForUser(step, login)
 		logs := make([]pipelineStepLog, 0, len(detail.Logs[step.ID]))
 		for _, entry := range detail.Logs[step.ID] {
 			logs = append(logs, pipelineStepLog{
@@ -498,22 +565,26 @@ func (r *repoRouter) getPipelineRun(req *restful.Request, resp *restful.Response
 	}
 
 	runResp := pipelineRunDetailPipeline{
-		ID:       detail.Pipeline.ID,
-		Number:   detail.Pipeline.Number,
-		Status:   detail.Pipeline.Status,
-		Branch:   detail.Pipeline.Branch,
-		Commit:   detail.Pipeline.Commit,
-		Message:  detail.Pipeline.Message,
-		Author:   detail.Pipeline.Author,
-		Created:  detail.Pipeline.Created,
-		Started:  detail.Pipeline.Started,
-		Finished: detail.Pipeline.Finished,
+		ID:                  detail.Pipeline.ID,
+		Number:              detail.Pipeline.Number,
+		Status:              detail.Pipeline.Status,
+		Event:               string(detail.Pipeline.Event),
+		Title:               detail.Pipeline.Title,
+		Branch:              detail.Pipeline.Branch,
+		Commit:              detail.Pipeline.Commit,
+		Message:             detail.Pipeline.Message,
+		Author:              detail.Pipeline.Author,
+		Created:             detail.Pipeline.Created,
+		Started:             detail.Pipeline.Started,
+		Finished:            detail.Pipeline.Finished,
+		AdditionalVariables: detail.Pipeline.AdditionalVariables,
+		Errors:              detail.Pipeline.Errors,
 	}
 
-	_ = resp.WriteHeaderAndEntity(http.StatusOK, pipelineRunDetailResponse{
+	return pipelineRunDetailResponse{
 		Pipeline:  runResp,
 		Workflows: workflows,
-	})
+	}
 }
 
 func (r *repoRouter) submitPipelineApproval(req *restful.Request, resp *restful.Response) {
@@ -646,10 +717,7 @@ func (r *repoRouter) getPipelineConfig(req *restful.Request, resp *restful.Respo
 		return
 	}
 
-	_ = resp.WriteHeaderAndEntity(http.StatusOK, pipelineConfigResponse{
-		Content:   cfg.Content,
-		UpdatedAt: cfg.Updated,
-	})
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, r.toPipelineConfigResponse(req.Request.Context(), cfg))
 }
 
 func (r *repoRouter) updatePipelineConfig(req *restful.Request, resp *restful.Response) {
@@ -674,16 +742,67 @@ func (r *repoRouter) updatePipelineConfig(req *restful.Request, resp *restful.Re
 		return
 	}
 
-	cfg, err := r.services.Pipeline.UpsertPipelineConfig(req.Request.Context(), repo.ID, body.Content)
+	source := strings.TrimSpace(body.Source)
+	if source == "" {
+		source = model.PipelineConfigSourceInline
+	}
+	switch source {
+	case model.PipelineConfigSourceInline, model.PipelineConfigSourceTemplate, model.PipelineConfigSourceCompose:
+		// ok
+	default:
+		writeError(resp, http.StatusBadRequest, fmt.Errorf("invalid pipeline config source: %s", source))
+		return
+	}
+	if source == model.PipelineConfigSourceTemplate && (body.TemplateID == nil || *body.TemplateID <= 0) {
+		writeError(resp, http.StatusBadRequest, errors.New("template_id is required when source=template"))
+		return
+	}
+	if source == model.PipelineConfigSourceCompose && len(body.ComposeSteps) == 0 {
+		writeError(resp, http.StatusBadRequest, errors.New("compose_steps is required when source=compose"))
+		return
+	}
+
+	cfg, err := r.services.Pipeline.UpsertPipelineConfigSource(req.Request.Context(), repo.ID, pipelinesvc.PipelineConfigInput{
+		Source:       source,
+		Content:      body.Content,
+		TemplateID:   body.TemplateID,
+		Variables:    body.TemplateVariables,
+		ComposeSteps: body.ComposeSteps,
+	})
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
 		return
 	}
 
-	_ = resp.WriteHeaderAndEntity(http.StatusOK, pipelineConfigResponse{
-		Content:   cfg.Content,
-		UpdatedAt: cfg.Updated,
-	})
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, r.toPipelineConfigResponse(req.Request.Context(), cfg))
+}
+
+func (r *repoRouter) toPipelineConfigResponse(ctx context.Context, cfg *model.RepoPipelineConfig) pipelineConfigResponse {
+	if cfg == nil {
+		return pipelineConfigResponse{Source: model.PipelineConfigSourceInline}
+	}
+	out := pipelineConfigResponse{
+		Source:            cfg.EffectiveSource(),
+		Content:           cfg.Content,
+		TemplateID:        cfg.TemplateID,
+		TemplateVariables: cfg.TemplateVariables,
+		ComposeSteps:      cfg.ComposeSteps,
+		UpdatedAt:         cfg.Updated,
+	}
+	if out.Source == model.PipelineConfigSourceTemplate && cfg.TemplateID != nil && r.services != nil && r.services.PipelineTemplate != nil {
+		if tpl, err := r.services.PipelineTemplate.Get(ctx, *cfg.TemplateID); err == nil && tpl != nil {
+			out.TemplateName = tpl.Name
+			out.TemplateDisplay = tpl.DisplayName
+			out.TemplatePublished = tpl.IsPublished()
+		}
+	}
+	if out.Source == model.PipelineConfigSourceTemplate && out.TemplateVariables == nil {
+		out.TemplateVariables = map[string]string{}
+	}
+	if out.Source == model.PipelineConfigSourceCompose && out.ComposeSteps == nil {
+		out.ComposeSteps = []model.ComposeStepRef{}
+	}
+	return out
 }
 
 func (r *repoRouter) triggerPipeline(req *restful.Request, resp *restful.Response) {
