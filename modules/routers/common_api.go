@@ -13,6 +13,7 @@ type Routers struct {
 	web               *webHandler
 	auth              *authRouter
 	repos             *repoRouter
+	stream            *streamLogsRouter
 	system            *systemRouter
 	k8s               *k8sRouter
 	rbac              *rbacRouter
@@ -30,6 +31,7 @@ func NewRouters(cfg *config.Config, services *service.Services, authMW *authmw.M
 		web:               &webHandler{},
 		auth:              newAuthRouter(services, authMW, cfg.Auth.Provider),
 		repos:             newRepoRouter(services, authMW),
+		stream:            newStreamLogsRouter(services, authMW),
 		k8s:               newK8sRouter(services, authMW),
 		system:            newSystemRouter(services, authMW),
 		rbac:              newRBACRouter(services, authMW),
@@ -62,6 +64,7 @@ func (r *Routers) Router(register func(string) *restful.WebService) []*restful.W
 	{
 		repoTags := []string{"仓库"}
 		ws = append(ws, r.repos.router(register, repoTags)...)
+		ws = append(ws, r.stream.router(register, repoTags)...)
 	}
 
 	{

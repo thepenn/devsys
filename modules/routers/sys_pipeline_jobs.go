@@ -206,6 +206,34 @@ func (r *pipelineJobsRouter) router(register func(string) *restful.WebService, t
 		Returns(http.StatusOK, "run", pipelineRunDetailResponse{}).
 		Returns(http.StatusNotFound, "not found", errorResponse{}))
 
+	ws.Route(ws.GET("/{id}/runs/{run_id}/meta").To(r.getRunMeta).
+		Doc("Job 运行元数据（无日志行）").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Writes(pipelineRunDetailResponse{}).
+		Returns(http.StatusOK, "meta", pipelineRunDetailResponse{}).
+		Returns(http.StatusNotFound, "not found", errorResponse{}))
+
+	ws.Route(ws.GET("/{id}/runs/{run_id}/steps/{step_id}/logs").To(r.getRunStepLogs).
+		Doc("Job 步骤增量日志").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Writes(pipelineStepLogsIncrementalResponse{}).
+		Returns(http.StatusOK, "logs", pipelineStepLogsIncrementalResponse{}).
+		Returns(http.StatusNotFound, "not found", errorResponse{}))
+
+	ws.Route(ws.GET("/{id}/runs/{run_id}/steps/{step_id}/stream/logs").To(r.streamRunStepLogs).
+		Doc("Job 步骤日志 SSE").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Returns(http.StatusOK, "text/event-stream", nil))
+
 	ws.Route(ws.POST("/{id}/runs/{run_id}/cancel").To(r.cancelRun).
 		Doc("取消 Job 运行").
 		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
@@ -438,6 +466,91 @@ func (r *pipelineJobsRouter) getRun(req *restful.Request, resp *restful.Response
 		return
 	}
 	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineRunDetailResponse(detail, actorOf(claims)))
+}
+
+func (r *pipelineJobsRouter) getRunMeta(req *restful.Request, resp *restful.Response) {
+	jobID, err := parseInt64Param(req, "id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	runID, err := parseInt64Param(req, "run_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	claims, _ := authmw.FromContext(req.Request.Context())
+	meta, err := r.services.Pipeline.GetJobPipelineRunMeta(req.Request.Context(), jobID, runID)
+	if err != nil {
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	if meta == nil || meta.Pipeline == nil {
+		writeError(resp, http.StatusNotFound, errors.New("pipeline run not found"))
+		return
+	}
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineRunMetaResponse(meta, actorOf(claims)))
+}
+
+func (r *pipelineJobsRouter) getRunStepLogs(req *restful.Request, resp *restful.Response) {
+	jobID, err := parseInt64Param(req, "id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	runID, err := parseInt64Param(req, "run_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	stepID, err := parseInt64Param(req, "step_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	afterLine, _ := strconv.Atoi(strings.TrimSpace(req.QueryParameter("after_line")))
+	if afterLine < 0 {
+		afterLine = 0
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(req.QueryParameter("limit")))
+	result, err := r.services.Pipeline.GetJobPipelineStepLogsIncremental(req.Request.Context(), jobID, runID, stepID, afterLine, limit)
+	if err != nil {
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	if result == nil {
+		writeError(resp, http.StatusNotFound, errors.New("pipeline run or step not found"))
+		return
+	}
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineStepLogsIncrementalResponse(result))
+}
+
+func (r *pipelineJobsRouter) streamRunStepLogs(req *restful.Request, resp *restful.Response) {
+	jobID, err := parseInt64Param(req, "id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	runID, err := parseInt64Param(req, "run_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	stepID, err := parseInt64Param(req, "step_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	step, err := r.services.Pipeline.GetJobPipelineStepForStreamer(req.Request.Context(), jobID, runID, stepID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeError(resp, http.StatusNotFound, errors.New("pipeline run or step not found"))
+			return
+		}
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	writeWoodpeckerStepLogSSE(resp, req, r.services.Pipeline, step)
 }
 
 func (r *pipelineJobsRouter) cancelRun(req *restful.Request, resp *restful.Response) {

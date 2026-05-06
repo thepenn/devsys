@@ -31,6 +31,7 @@ import (
 	"github.com/thepenn/devsys/internal/cache"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/model"
+	"github.com/thepenn/devsys/service/pipeline/logmux"
 	"github.com/thepenn/devsys/service/pipeline/queue"
 	dockerruntime "github.com/thepenn/devsys/service/pipeline/runtime/docker"
 	"github.com/thepenn/devsys/service/pipeline/spec"
@@ -78,6 +79,7 @@ type Service struct {
 	dockerRuntime     *dockerruntime.Runtime
 	dockerRuntimeOnce sync.Once
 	dockerRuntimeErr  error
+	stepLogMux        *logmux.Mux
 }
 
 type Option func(*Service)
@@ -88,6 +90,25 @@ type PipelineRunDetail struct {
 	Steps     []*model.Step
 	Logs      map[int64][]model.LogEntry
 }
+
+// PipelineRunMeta is a lightweight run snapshot without log lines (for polling UI state).
+type PipelineRunMeta struct {
+	Pipeline  *model.Pipeline
+	Workflows []*model.Workflow
+	Steps     []*model.Step
+}
+
+// PipelineStepLogsIncrementalResult holds new log lines after a cursor line number.
+type PipelineStepLogsIncrementalResult struct {
+	Entries   []model.LogEntry
+	NextAfter int
+	Step      *model.Step
+}
+
+const (
+	pipelineLogIncrementalDefaultLimit = 500
+	pipelineLogIncrementalMaxLimit     = 2000
+)
 
 type pipelineTaskPayload struct {
 	PipelineID    int64              `json:"pipeline_id"`
@@ -467,6 +488,13 @@ func WithTemplateService(template *templatesvc.Service) Option {
 	}
 }
 
+// WithStepLogMux overrides the in-memory step log multiplexer (tests); nil skips default.
+func WithStepLogMux(m *logmux.Mux) Option {
+	return func(s *Service) {
+		s.stepLogMux = m
+	}
+}
+
 func NewService(db *store.DB, q *queue.PipelineQueue, c *cache.Cache, opts ...Option) *Service {
 	s := &Service{
 		db:             db,
@@ -481,6 +509,10 @@ func NewService(db *store.DB, q *queue.PipelineQueue, c *cache.Cache, opts ...Op
 
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	if s.stepLogMux == nil {
+		s.stepLogMux = logmux.New()
 	}
 
 	return s
@@ -992,7 +1024,10 @@ func (s *Service) triggerPipelineWithEvent(ctx context.Context, repo *model.Repo
 			branch = "main"
 		}
 	}
-	commit := strings.TrimSpace(opts.Commit)
+	commit := EffectiveCommitFromOptions(opts)
+	if commit == "" {
+		return nil, ErrPipelineCommitRequired
+	}
 	normalizedAuthor := strings.TrimSpace(author)
 	if normalizedAuthor == "" {
 		normalizedAuthor = "system"
@@ -1067,9 +1102,22 @@ func (s *Service) BuildAndEnqueueRun(ctx context.Context, in BuildAndEnqueueInpu
 		branch = "main"
 	}
 
-	variables := in.Variables
+	variables := cloneStringMap(in.Variables)
 	if variables == nil {
 		variables = map[string]string{}
+	}
+	commit := EffectiveCommitFromOptions(model.PipelineOptions{Commit: in.Commit, Variables: variables})
+	if commit == "" {
+		return nil, ErrPipelineCommitRequired
+	}
+	if strings.TrimSpace(variables["CI_COMMIT_SHA"]) == "" {
+		variables["CI_COMMIT_SHA"] = commit
+	}
+	if strings.TrimSpace(variables["COMMIT_ID"]) == "" {
+		variables["COMMIT_ID"] = commit
+	}
+	if strings.TrimSpace(variables["COMMIT_ID_SHA"]) == "" {
+		variables["COMMIT_ID_SHA"] = commit
 	}
 
 	var (
@@ -1113,7 +1161,7 @@ func (s *Service) BuildAndEnqueueRun(ctx context.Context, in BuildAndEnqueueInpu
 		Updated:             now,
 		Branch:              branch,
 		Ref:                 fmt.Sprintf("refs/heads/%s", branch),
-		Commit:              strings.TrimSpace(in.Commit),
+		Commit:              commit,
 		AdditionalVariables: variables,
 	}
 
@@ -1538,6 +1586,232 @@ func (s *Service) getRunDetailWhere(ctx context.Context, pipelineID int64, where
 	return detail, nil
 }
 
+// GetPipelineRunMeta returns pipeline, workflows and steps without loading log_entries.
+func (s *Service) GetPipelineRunMeta(ctx context.Context, repoID, pipelineID int64) (*PipelineRunMeta, error) {
+	return s.getRunMetaWhere(ctx, pipelineID, "id = ? AND repo_id = ? AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)", []any{pipelineID, repoID, model.PipelineOwnerRepo})
+}
+
+// GetJobPipelineRunMeta is the job-scoped variant of GetPipelineRunMeta.
+func (s *Service) GetJobPipelineRunMeta(ctx context.Context, jobID, pipelineID int64) (*PipelineRunMeta, error) {
+	return s.getRunMetaWhere(ctx, pipelineID, "id = ? AND job_id = ? AND owner_kind = ?", []any{pipelineID, jobID, model.PipelineOwnerJob})
+}
+
+func (s *Service) getRunMetaWhere(ctx context.Context, pipelineID int64, whereClause string, whereArgs []any) (*PipelineRunMeta, error) {
+	meta := &PipelineRunMeta{
+		Workflows: []*model.Workflow{},
+		Steps:     []*model.Step{},
+	}
+	err := s.db.View(func(tx *gorm.DB) error {
+		var pipeline model.Pipeline
+		if err := tx.WithContext(ctx).
+			Where(whereClause, whereArgs...).
+			Take(&pipeline).Error; err != nil {
+			return err
+		}
+		meta.Pipeline = &pipeline
+
+		var workflows []*model.Workflow
+		if err := tx.WithContext(ctx).
+			Where("pipeline_id = ?", pipelineID).
+			Order("pid ASC").
+			Find(&workflows).Error; err != nil {
+			return err
+		}
+		meta.Workflows = workflows
+
+		var steps []*model.Step
+		if err := tx.WithContext(ctx).
+			Where("pipeline_id = ?", pipelineID).
+			Order("pid ASC").
+			Find(&steps).Error; err != nil {
+			return err
+		}
+		meta.Steps = steps
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+// GetRepoPipelineStepLogsIncremental returns log entries with line > afterLine for a step
+// that belongs to pipelineID scoped to repoID.
+func (s *Service) GetRepoPipelineStepLogsIncremental(ctx context.Context, repoID, pipelineID, stepID int64, afterLine, limit int) (*PipelineStepLogsIncrementalResult, error) {
+	return s.getPipelineStepLogsIncremental(ctx, pipelineID, stepID, "id = ? AND repo_id = ? AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)", []any{pipelineID, repoID, model.PipelineOwnerRepo}, afterLine, limit)
+}
+
+// GetJobPipelineStepLogsIncremental is the job-scoped variant.
+func (s *Service) GetJobPipelineStepLogsIncremental(ctx context.Context, jobID, pipelineID, stepID int64, afterLine, limit int) (*PipelineStepLogsIncrementalResult, error) {
+	return s.getPipelineStepLogsIncremental(ctx, pipelineID, stepID, "id = ? AND job_id = ? AND owner_kind = ?", []any{pipelineID, jobID, model.PipelineOwnerJob}, afterLine, limit)
+}
+
+func (s *Service) getPipelineStepLogsIncremental(ctx context.Context, pipelineID, stepID int64, pipelineWhere string, pipelineArgs []any, afterLine, limit int) (*PipelineStepLogsIncrementalResult, error) {
+	if limit <= 0 {
+		limit = pipelineLogIncrementalDefaultLimit
+	}
+	if limit > pipelineLogIncrementalMaxLimit {
+		limit = pipelineLogIncrementalMaxLimit
+	}
+	out := &PipelineStepLogsIncrementalResult{NextAfter: afterLine}
+	err := s.db.View(func(tx *gorm.DB) error {
+		var pipeline model.Pipeline
+		if err := tx.WithContext(ctx).
+			Where(pipelineWhere, pipelineArgs...).
+			Take(&pipeline).Error; err != nil {
+			return err
+		}
+		_ = pipeline
+
+		var step model.Step
+		if err := tx.WithContext(ctx).
+			Where("id = ? AND pipeline_id = ?", stepID, pipelineID).
+			Take(&step).Error; err != nil {
+			return err
+		}
+
+		var entries []model.LogEntry
+		if err := tx.WithContext(ctx).
+			Where("step_id = ? AND line > ?", stepID, afterLine).
+			Order("line ASC").
+			Limit(limit).
+			Find(&entries).Error; err != nil {
+			return err
+		}
+		nextAfter := afterLine
+		for _, e := range entries {
+			if e.Line > nextAfter {
+				nextAfter = e.Line
+			}
+		}
+		out.Entries = entries
+		out.NextAfter = nextAfter
+		out.Step = &step
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// StepLogsStreamActive reports whether a step may still receive new log lines.
+func StepLogsStreamActive(state model.StatusValue) bool {
+	switch state {
+	case model.StatusPending, model.StatusRunning, model.StatusBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+// LogMuxOpen ensures an in-memory log stream exists for the step (Woodpecker Logs.Open).
+func (s *Service) LogMuxOpen(ctx context.Context, stepID int64) error {
+	if s.stepLogMux == nil {
+		return nil
+	}
+	return s.stepLogMux.Open(ctx, stepID)
+}
+
+// LogMuxTail subscribes to log batches (Woodpecker Logs.Tail).
+func (s *Service) LogMuxTail(ctx context.Context, stepID int64, batches chan<- []*model.LogEntry) error {
+	if s.stepLogMux == nil {
+		return logmux.ErrNotFound
+	}
+	return s.stepLogMux.Tail(ctx, stepID, batches)
+}
+
+// LogMuxClose tears down the stream for a step (Woodpecker Logs.Close).
+func (s *Service) LogMuxClose(ctx context.Context, stepID int64) error {
+	if s.stepLogMux == nil {
+		return nil
+	}
+	return s.stepLogMux.Close(ctx, stepID)
+}
+
+// GetRepoPipelineStepForLogStream resolves a repo pipeline by human number (Woodpecker /stream/logs/.../pipeline/).
+func (s *Service) GetRepoPipelineStepForLogStream(ctx context.Context, repoID, pipelineNumber, stepID int64) (*model.Pipeline, *model.Step, error) {
+	var p model.Pipeline
+	err := s.db.GetDB().WithContext(ctx).
+		Where("repo_id = ? AND number = ? AND job_id = 0 AND (owner_kind = ? OR owner_kind = '' OR owner_kind IS NULL)",
+			repoID, pipelineNumber, model.PipelineOwnerRepo).
+		First(&p).Error
+	if err != nil {
+		return nil, nil, err
+	}
+	var st model.Step
+	if err := s.db.GetDB().WithContext(ctx).
+		Where("id = ? AND pipeline_id = ?", stepID, p.ID).
+		First(&st).Error; err != nil {
+		return nil, nil, err
+	}
+	return &p, &st, nil
+}
+
+// GetJobPipelineStepForLogStream resolves a job-owned pipeline by run number.
+func (s *Service) GetJobPipelineStepForLogStream(ctx context.Context, jobID, pipelineNumber, stepID int64) (*model.Pipeline, *model.Step, error) {
+	var p model.Pipeline
+	err := s.db.GetDB().WithContext(ctx).
+		Where("job_id = ? AND number = ? AND owner_kind = ?", jobID, pipelineNumber, model.PipelineOwnerJob).
+		First(&p).Error
+	if err != nil {
+		return nil, nil, err
+	}
+	var st model.Step
+	if err := s.db.GetDB().WithContext(ctx).
+		Where("id = ? AND pipeline_id = ?", stepID, p.ID).
+		First(&st).Error; err != nil {
+		return nil, nil, err
+	}
+	return &p, &st, nil
+}
+
+// GetRepoPipelineStepForStreamer loads a step for nested repo stream paths (pipeline DB id).
+func (s *Service) GetRepoPipelineStepForStreamer(ctx context.Context, repoID, pipelineID, stepID int64) (*model.Step, error) {
+	var n int64
+	if err := s.db.GetDB().WithContext(ctx).Model(&model.Pipeline{}).
+		Where("id = ? AND repo_id = ?", pipelineID, repoID).
+		Count(&n).Error; err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var st model.Step
+	if err := s.db.GetDB().WithContext(ctx).
+		Where("id = ? AND pipeline_id = ?", stepID, pipelineID).
+		First(&st).Error; err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// GetJobPipelineStepForStreamer loads a step for nested job stream paths.
+func (s *Service) GetJobPipelineStepForStreamer(ctx context.Context, jobID, pipelineID, stepID int64) (*model.Step, error) {
+	var n int64
+	if err := s.db.GetDB().WithContext(ctx).Model(&model.Pipeline{}).
+		Where("id = ? AND job_id = ? AND owner_kind = ?", pipelineID, jobID, model.PipelineOwnerJob).
+		Count(&n).Error; err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var st model.Step
+	if err := s.db.GetDB().WithContext(ctx).
+		Where("id = ? AND pipeline_id = ?", stepID, pipelineID).
+		First(&st).Error; err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
 func (s *Service) SubmitStepApproval(ctx context.Context, repoID, pipelineID, stepID int64, actor string, action string, comment string) (*model.Step, error) {
 	return s.submitStepApproval(ctx, model.PipelineOwnerRepo, repoID, pipelineID, stepID, actor, action, comment)
 }
@@ -1825,6 +2099,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		envMap["REPO_CLONE_URL_AUTH"] = envMap["REPO_CLONE_URL"]
 	}
 
+	s.applyPayloadCommitToEnvIfMissing(ctx, pipelineRecord, payload, envMap)
+
 	var workspace string
 	var workspaceRoot string
 	workspaceCleanup := false
@@ -1834,6 +2110,7 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 	dockerfileInjected := false
 
 	pipelineEnv := make(map[string]string)
+	mergeCommitKeysFromEnv(envMap, pipelineEnv)
 
 	ensureDockerfile := func(force bool, logger func(string) error) error {
 		if dockerfileInjected {
@@ -2024,6 +2301,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			}
 		}
 
+		mergeCommitKeysFromEnv(envMap, pipelineEnv)
+
 		envMap["CI_STEP_NAME"] = execStep.Name
 		envMap["CI_STEP_IMAGE"] = execStep.Image
 
@@ -2121,6 +2400,8 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 			if err := s.setStepFinished(ctx, stepRecord.ID, model.StatusSuccess, time.Now().Unix(), nil, 0); err != nil {
 				return err
 			}
+			pipelineEnv = placeholderEnv
+			continue
 		} else if usePluginRuntime {
 			exitCode, err := s.runPluginStep(taskCtx, execStep, stepEnv, workspace, execStep.Plugin, ensureDockerfile, logFn)
 			if err != nil {
@@ -2164,28 +2445,6 @@ func (s *Service) handleTask(ctx context.Context, task *model.Task) error {
 		for key, value := range postEnvValues {
 			stepEnv[key] = value
 			placeholderEnv[key] = value
-		}
-
-		if strings.TrimSpace(pipelineRecord.Commit) == "" && workspace != "" {
-			if commit, err := resolveWorkspaceCommit(taskCtx, workspace); err == nil && commit != "" {
-				if err := s.updatePipelineCommit(ctx, pipelineRecord.ID, commit); err != nil {
-					log.Warn().Err(err).Int64("pipeline_id", pipelineRecord.ID).Msg("failed to persist resolved commit")
-				} else {
-					pipelineRecord.Commit = commit
-				}
-				updateCommitEnv := func(target map[string]string) {
-					if target == nil {
-						return
-					}
-					target["CI_COMMIT_SHA"] = commit
-					target["COMMIT_ID"] = commit
-					target["COMMIT_ID_SHA"] = commit
-				}
-				updateCommitEnv(envMap)
-				updateCommitEnv(stepEnv)
-				updateCommitEnv(placeholderEnv)
-				updateCommitEnv(pipelineEnv)
-			}
 		}
 
 		if err := s.setStepFinished(ctx, stepRecord.ID, model.StatusSuccess, time.Now().Unix(), nil, 0); err != nil {
@@ -2436,6 +2695,10 @@ func (s *Service) appendLogLine(ctx context.Context, stepID int64, line *int, co
 	if err := s.db.GetDB().WithContext(ctx).Create(&entry).Error; err != nil {
 		return err
 	}
+	if s.stepLogMux != nil {
+		e := entry
+		_ = s.stepLogMux.Write(ctx, stepID, []*model.LogEntry{&e})
+	}
 	*line++
 	return nil
 }
@@ -2468,12 +2731,19 @@ func (s *Service) setStepFinished(ctx context.Context, stepID int64, status mode
 	if exitCode >= 0 {
 		update["exit_code"] = exitCode
 	}
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		return tx.WithContext(ctx).
 			Model(&model.Step{}).
 			Where("id = ?", stepID).
 			Updates(update).Error
 	})
+	if err != nil {
+		return err
+	}
+	if s.stepLogMux != nil {
+		_ = s.stepLogMux.Close(ctx, stepID)
+	}
+	return nil
 }
 
 func (s *Service) markPipelineFinished(ctx context.Context, pipelineID int64, status model.StatusValue, finished int64, message string, taskID string) error {
@@ -3615,6 +3885,14 @@ func (s *Service) runBuildStep(ctx context.Context, step pipelineTaskStep, stepE
 		defer ensureDockerfile(false, logFn)
 	}
 
+	effectiveTagInputs := applyEnvPlaceholders(append([]string(nil), build.Tags...), stepEnv)
+	effectiveTags := sanitizeResolvedBuildTags(effectiveTagInputs)
+	if len(effectiveTags) == 0 {
+		effectiveTags = []string{"latest"}
+	}
+	buildForCtl := *build
+	buildForCtl.Tags = effectiveTags
+
 	registry, username, password, err := resolveBuildRegistryCredentials(step.Name, build, stepSecrets)
 	if err != nil {
 		return -1, err
@@ -3641,7 +3919,7 @@ func (s *Service) runBuildStep(ctx context.Context, step pipelineTaskStep, stepE
 	relConfigDir = strings.TrimPrefix(relConfigDir, string(filepath.Separator))
 	containerConfigDir := path.Join(containerWorkspace, filepath.ToSlash(relConfigDir))
 
-	args := buildBuildctlArgs(build, registry, containerWorkspace)
+	args := buildBuildctlArgs(&buildForCtl, registry, containerWorkspace)
 
 	// 运行模式由镜像名 + 显式 build.Privileged 共同决定:
 	//   - 镜像名含 "rootless" 且 build.Privileged 未强制 true → rootless 模式
@@ -3654,7 +3932,7 @@ func (s *Service) runBuildStep(ctx context.Context, step pipelineTaskStep, stepE
 
 	if logFn != nil {
 		_ = logFn(fmt.Sprintf("BuildKit registry=%s repo=%s tags=%v platforms=%v push=%v mode=%s",
-			registry, build.Repo, build.Tags, build.Platforms, buildPushEnabled(build),
+			registry, buildForCtl.Repo, buildForCtl.Tags, buildForCtl.Platforms, buildPushEnabled(&buildForCtl),
 			privilegedModeLabel(usePrivileged)))
 	}
 
@@ -3717,6 +3995,19 @@ func buildPushEnabled(b *pipelineBuildConfig) bool {
 		return true
 	}
 	return *b.Push
+}
+
+// sanitizeResolvedBuildTags trims tags and drops empties after env placeholder expansion.
+func sanitizeResolvedBuildTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // resolveBuildRegistryCredentials 拼出 docker registry 推送所需的 (registry,
@@ -4706,17 +4997,24 @@ func (s *Service) fetchPipelineIDSet(ctx context.Context, repoID int64) map[int6
 	return result
 }
 
-func resolveWorkspaceCommit(ctx context.Context, dir string) (string, error) {
-	gitDir := filepath.Join(dir, ".git")
-	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("git directory not found")
+// ErrPipelineCommitRequired 表示未提供 commit 且 variables 中亦无 COMMIT_ID / CI_COMMIT_SHA。
+var ErrPipelineCommitRequired = errors.New("缺少 commit：请在请求中提供 commit，或在 variables 中设置 COMMIT_ID 或 CI_COMMIT_SHA")
+
+// EffectiveCommitFromOptions 合并顶层 commit 与 variables 中的 COMMIT_ID / CI_COMMIT_SHA。
+func EffectiveCommitFromOptions(opts model.PipelineOptions) string {
+	c := strings.TrimSpace(opts.Commit)
+	if c != "" {
+		return c
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
+	if opts.Variables == nil {
+		return ""
 	}
-	return strings.TrimSpace(string(output)), nil
+	for _, k := range []string{"COMMIT_ID", "CI_COMMIT_SHA"} {
+		if v := strings.TrimSpace(opts.Variables[k]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (s *Service) updatePipelineCommit(ctx context.Context, pipelineID int64, commit string) error {
@@ -4729,6 +5027,46 @@ func (s *Service) updatePipelineCommit(ctx context.Context, pipelineID int64, co
 			Where("id = ?", pipelineID).
 			Update("commit", commit).Error
 	})
+}
+
+// applyPayloadCommitToEnvIfMissing 在 DB 流水线行尚无 commit 时，用任务 payload 里的 commit
+// 回填 envMap 并尽量落库，避免 providePipelineEnv 已跑过但行上 commit 尚未写入的空窗期。
+func (s *Service) applyPayloadCommitToEnvIfMissing(ctx context.Context, pipelineRecord *model.Pipeline, payload pipelineTaskPayload, envMap map[string]string) {
+	if pipelineRecord == nil || envMap == nil {
+		return
+	}
+	if strings.TrimSpace(pipelineRecord.Commit) != "" {
+		return
+	}
+	commit := strings.TrimSpace(payload.Commit)
+	if commit == "" {
+		return
+	}
+	envMap["CI_COMMIT_SHA"] = commit
+	envMap["COMMIT_ID"] = commit
+	envMap["COMMIT_ID_SHA"] = commit
+	if err := s.updatePipelineCommit(ctx, pipelineRecord.ID, commit); err != nil {
+		log.Warn().Err(err).Int64("pipeline_id", pipelineRecord.ID).Msg("failed to persist commit from task payload")
+	}
+	pipelineRecord.Commit = commit
+}
+
+// mergeCommitKeysFromEnv 把 src 中已解析的 commit 三键复制到 dst，供 pipelineEnv / placeholderEnv
+// 与 prepareStepEnv 解析 ${COMMIT_ID} 等占位符使用。
+func mergeCommitKeysFromEnv(src, dst map[string]string) {
+	if src == nil || dst == nil {
+		return
+	}
+	commit := strings.TrimSpace(src["CI_COMMIT_SHA"])
+	if commit == "" {
+		commit = strings.TrimSpace(src["COMMIT_ID"])
+	}
+	if commit == "" {
+		return
+	}
+	dst["CI_COMMIT_SHA"] = commit
+	dst["COMMIT_ID"] = commit
+	dst["COMMIT_ID_SHA"] = commit
 }
 
 func addCredentialsToURL(rawURL, username, password string) (string, error) {

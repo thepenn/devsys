@@ -530,12 +530,40 @@ POST /api/v1/repos/{repo_id}/pipeline/runs/{pipeline_id}/cancel?reason=manual
 | `blocked` | Waiting for approval |
 | `skipped` | Skipped due to `when` conditions |
 
+### Live log streaming (Woodpecker-compatible)
+
+Live logs use **Server-Sent Events** aligned with [Woodpecker `LogStreamSSE`](https://github.com/woodpecker-ci/woodpecker/blob/main/server/api/stream.go): an in-process multiplexer fans out log lines written by the worker (no per-second database polling on the hot path).
+
+**Endpoints**
+
+| Path | Notes |
+|------|--------|
+| `GET /stream/logs/{repo_id}/{pipeline}/{step_id}` | Woodpecker-shaped URL for repository pipelines. `{pipeline}` is the pipeline **run number** (the `#` shown in the UI), not the internal `pipelines.id` primary key. |
+| `GET /pipeline-jobs/{id}/runs/{run_id}/steps/{step_id}/stream/logs` | Same SSE wire format for standalone Job runs (`{run_id}` is the pipeline row id). |
+
+**Full / historical lines** remain on the incremental REST handlers, e.g. `GET .../steps/{step_id}/logs?after_line=…`.
+
+**SSE behaviour**
+
+- Response: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
+- First line is a comment ping `: ping\n\n`; additional pings every **30s** idle time.
+- Each log record is one event: `id: <n>\n` + `data: <json>\n\n` with a monotonically increasing `id` per connection (starting at 1). Clients may send header `Last-Event-ID` on reconnect; the server skips already-acknowledged ids the same way Woodpecker does.
+- Normal completion when the step finishes streaming: `event: eof\ndata: eof\n\n`.
+- Errors: `event: error\ndata: <single-line message>\n\n` (for example `step not running (anymore)` when the step is not `pending` or `running`).
+- JSON payload fields mirror the REST log rows: at least `line`, `type` (numeric enum), `time`, and both `out` and `content` (same UTF-8 text) for UI compatibility.
+
+**Limits**
+
+- The multiplexer is **in-memory per API process**. Multi-replica deployments would need a shared bus (Redis, etc.) to match Woodpecker’s single-node assumption.
+
 ### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/repos/{repo_id}/pipeline/runs` | List pipeline runs for a repository |
 | `GET` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}` | Get pipeline run detail (workflows, steps, logs) |
+| `GET` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/logs` | Incremental log lines (`after_line` cursor) |
+| `GET` | `/stream/logs/{repo_id}/{pipeline}/{step_id}` | Live step logs (SSE); `{pipeline}` = run **number** |
 | `POST` | `/repos/{repo_id}/pipeline/run` | Trigger a manual pipeline run |
 | `POST` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/cancel` | Cancel a running pipeline |
 | `POST` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/approval` | Submit approval decision |
@@ -1072,12 +1100,38 @@ POST /api/v1/repos/{repo_id}/pipeline/runs/{pipeline_id}/cancel?reason=manual
 | `blocked` | 等待审批 |
 | `skipped` | 因 `when` 条件跳过 |
 
+### 实时日志流（Woodpecker 兼容）
+
+运行中步骤的实时日志为 **SSE**，语义与 [Woodpecker `LogStreamSSE`](https://github.com/woodpecker-ci/woodpecker/blob/main/server/api/stream.go) 对齐：Worker 写入 DB 后同步推送到进程内 **log mux**，订阅端不再依赖每秒轮询数据库。
+
+**路径**
+
+| 路径 | 说明 |
+|------|------|
+| `GET /stream/logs/{repo_id}/{pipeline}/{step_id}` | 与 Woodpecker 同构（仓库流水线）。`{pipeline}` 为 **展示编号**（界面上的 `#`），不是 `pipelines.id` 主键。 |
+| `GET /pipeline-jobs/{id}/runs/{run_id}/steps/{step_id}/stream/logs` | 独立 Job 运行（`{run_id}` 为 pipeline 行 id），帧格式与上相同。 |
+
+**全量 / 断点续拉** 仍用增量 REST，例如 `GET .../steps/{step_id}/logs?after_line=…`。
+
+**SSE 要点**
+
+- 响应头：`text/event-stream`、`Cache-Control: no-cache`、`Connection: keep-alive`、`X-Accel-Buffering: no`。
+- 首包注释 ping `: ping`，之后空闲 **30 秒** 再发 `: ping`。
+- 每条日志：`id: <序号>\n` + `data: <单行 JSON>\n\n`；连接内序号从 1 递增。重连可带请求头 `Last-Event-ID`，服务端跳过已确认的序号（与 Woodpecker 一致）。
+- 正常结束：`event: eof\ndata: eof\n\n`。
+- 错误：`event: error\ndata: <单行说明>\n\n`（例如步骤非 `pending`/`running` 时为 `step not running (anymore)`）。
+- JSON 字段含 `line`、`type`（数值枚举）、`time`，以及内容相同的 `out` 与 `content` 便于前端兼容。
+
+**限制**：mux 为 **单进程内存**；多副本需改为 Redis 等共享通道。
+
 ### API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/repos/{repo_id}/pipeline/runs` | 列出仓库的流水线运行记录 |
 | `GET` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}` | 获取流水线运行详情（工作流、步骤、日志） |
+| `GET` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/logs` | 增量日志（`after_line` 游标） |
+| `GET` | `/stream/logs/{repo_id}/{pipeline}/{step_id}` | 实时日志（SSE）；`{pipeline}` = 运行 **编号** |
 | `POST` | `/repos/{repo_id}/pipeline/run` | 手动触发流水线 |
 | `POST` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/cancel` | 取消运行中的流水线 |
 | `POST` | `/repos/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/approval` | 提交审批决定 |

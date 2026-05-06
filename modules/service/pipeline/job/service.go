@@ -431,6 +431,19 @@ func (s *Service) triggerJobWithEvent(ctx context.Context, jobID int64, opts mod
 	for k, v := range opts.Variables {
 		mergedVars[k] = v
 	}
+	commit := pipelinesvc.EffectiveCommitFromOptions(model.PipelineOptions{Commit: opts.Commit, Variables: mergedVars})
+	if commit == "" {
+		return nil, pipelinesvc.ErrPipelineCommitRequired
+	}
+	if strings.TrimSpace(mergedVars["CI_COMMIT_SHA"]) == "" {
+		mergedVars["CI_COMMIT_SHA"] = commit
+	}
+	if strings.TrimSpace(mergedVars["COMMIT_ID"]) == "" {
+		mergedVars["COMMIT_ID"] = commit
+	}
+	if strings.TrimSpace(mergedVars["COMMIT_ID_SHA"]) == "" {
+		mergedVars["COMMIT_ID_SHA"] = commit
+	}
 	// 渲染优先级: opts.Variables ⊕ job.Variables (上面已合并)
 	//             > Certificate 仓库按变量名 fallback
 	//             > ${VAR:-default}
@@ -482,7 +495,7 @@ func (s *Service) triggerJobWithEvent(ctx context.Context, jobID int64, opts mod
 		Message:    finalMessage,
 		Title:      finalTitle,
 		Branch:     branch,
-		Commit:     strings.TrimSpace(opts.Commit),
+		Commit:     commit,
 		Variables:  mergedVars,
 		YAML:       rendered,
 		RepoURL:    repoURL,

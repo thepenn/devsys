@@ -131,6 +131,15 @@ type pipelineStepLog struct {
 	Content string `json:"content"`
 }
 
+type pipelineStepLogsIncrementalResponse struct {
+	Items        []pipelineStepLog   `json:"items"`
+	NextAfter    int                 `json:"next_after"`
+	StepState    model.StatusValue   `json:"step_state"`
+	StepStarted  int64               `json:"step_started,omitempty"`
+	StepFinished int64               `json:"step_finished,omitempty"`
+	ExitCode     int                 `json:"exit_code,omitempty"`
+}
+
 type approvalActionRequest struct {
 	Action  string `json:"action"`
 	Comment string `json:"comment"`
@@ -224,6 +233,41 @@ func (r *repoRouter) router(register func(string) *restful.WebService, tags []st
 		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
 		Returns(http.StatusNotFound, "not found", errorResponse{}).
 		Returns(http.StatusInternalServerError, "error", errorResponse{}))
+
+	ws.Route(ws.GET("/{repo_id}/pipeline/runs/{pipeline_id}/meta").To(r.getPipelineRunMeta).
+		Doc("Get pipeline run metadata without log lines (lightweight polling)").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Filter(r.authMW.RequireAuth).
+		Returns(http.StatusOK, "pipeline run meta", pipelineRunDetailResponse{}).
+		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
+		Returns(http.StatusNotFound, "not found", errorResponse{}).
+		Returns(http.StatusInternalServerError, "error", errorResponse{}))
+
+	ws.Route(ws.GET("/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/logs").To(r.getPipelineRunStepLogs).
+		Doc("Incremental log lines for a pipeline step (after_line cursor)").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Filter(r.authMW.RequireAuth).
+		Returns(http.StatusOK, "log chunk", pipelineStepLogsIncrementalResponse{}).
+		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
+		Returns(http.StatusNotFound, "not found", errorResponse{}).
+		Returns(http.StatusInternalServerError, "error", errorResponse{}))
+
+	ws.Route(ws.GET("/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/stream/logs").To(r.streamPipelineRunStepLogs).
+		Doc("Server-Sent Events stream of incremental step logs").
+		Metadata(restfulOpenapi.KeyOpenAPITags, tags).
+		Metadata(label.MetaACL, true).
+		Metadata(label.MetaLabels, read).
+		Metadata(label.MetaModule, label.ModuleProject).
+		Filter(r.authMW.RequireAuth).
+		Returns(http.StatusOK, "text/event-stream", nil).
+		Returns(http.StatusUnauthorized, "unauthorized", errorResponse{}).
+		Returns(http.StatusNotFound, "not found", errorResponse{}))
 
 	ws.Route(ws.POST("/{repo_id}/pipeline/runs/{pipeline_id}/steps/{step_id}/approval").To(r.submitPipelineApproval).
 		Doc("Submit an approval decision for a pipeline step").
@@ -515,6 +559,117 @@ func (r *repoRouter) getPipelineRun(req *restful.Request, resp *restful.Response
 	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineRunDetailResponse(detail, claims.Login))
 }
 
+func (r *repoRouter) getPipelineRunMeta(req *restful.Request, resp *restful.Response) {
+	claims, ok := authmw.FromContext(req.Request.Context())
+	if !ok {
+		writeError(resp, http.StatusUnauthorized, errors.New("unauthorized"))
+		return
+	}
+	repo, err := r.repoFromRequest(req, claims)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errRepoNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(resp, status, err)
+		return
+	}
+	pipelineID, err := parseInt64Param(req, "pipeline_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	meta, err := r.services.Pipeline.GetPipelineRunMeta(req.Request.Context(), repo.ID, pipelineID)
+	if err != nil {
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	if meta == nil || meta.Pipeline == nil {
+		writeError(resp, http.StatusNotFound, errors.New("pipeline run not found"))
+		return
+	}
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineRunMetaResponse(meta, claims.Login))
+}
+
+func (r *repoRouter) getPipelineRunStepLogs(req *restful.Request, resp *restful.Response) {
+	claims, ok := authmw.FromContext(req.Request.Context())
+	if !ok {
+		writeError(resp, http.StatusUnauthorized, errors.New("unauthorized"))
+		return
+	}
+	repo, err := r.repoFromRequest(req, claims)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errRepoNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(resp, status, err)
+		return
+	}
+	pipelineID, err := parseInt64Param(req, "pipeline_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	stepID, err := parseInt64Param(req, "step_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	afterLine, _ := strconv.Atoi(strings.TrimSpace(req.QueryParameter("after_line")))
+	if afterLine < 0 {
+		afterLine = 0
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(req.QueryParameter("limit")))
+	result, err := r.services.Pipeline.GetRepoPipelineStepLogsIncremental(req.Request.Context(), repo.ID, pipelineID, stepID, afterLine, limit)
+	if err != nil {
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	if result == nil {
+		writeError(resp, http.StatusNotFound, errors.New("pipeline run or step not found"))
+		return
+	}
+	_ = resp.WriteHeaderAndEntity(http.StatusOK, buildPipelineStepLogsIncrementalResponse(result))
+}
+
+func (r *repoRouter) streamPipelineRunStepLogs(req *restful.Request, resp *restful.Response) {
+	claims, ok := authmw.FromContext(req.Request.Context())
+	if !ok {
+		writeError(resp, http.StatusUnauthorized, errors.New("unauthorized"))
+		return
+	}
+	repo, err := r.repoFromRequest(req, claims)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errRepoNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(resp, status, err)
+		return
+	}
+	pipelineID, err := parseInt64Param(req, "pipeline_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	stepID, err := parseInt64Param(req, "step_id")
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	step, err := r.services.Pipeline.GetRepoPipelineStepForStreamer(req.Request.Context(), repo.ID, pipelineID, stepID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeError(resp, http.StatusNotFound, errors.New("pipeline run or step not found"))
+			return
+		}
+		writeError(resp, http.StatusInternalServerError, err)
+		return
+	}
+	writeWoodpeckerStepLogSSE(resp, req, r.services.Pipeline, step)
+}
+
 // buildPipelineRunDetailResponse 把 service 层的 PipelineRunDetail 转换成
 // HTTP DTO. 抽出来 repo / job 两套路由复用, 也保证审批权限同样被装饰.
 func buildPipelineRunDetailResponse(detail *pipelinesvc.PipelineRunDetail, login string) pipelineRunDetailResponse {
@@ -584,6 +739,42 @@ func buildPipelineRunDetailResponse(detail *pipelinesvc.PipelineRunDetail, login
 	return pipelineRunDetailResponse{
 		Pipeline:  runResp,
 		Workflows: workflows,
+	}
+}
+
+func buildPipelineRunMetaResponse(meta *pipelinesvc.PipelineRunMeta, login string) pipelineRunDetailResponse {
+	if meta == nil || meta.Pipeline == nil {
+		return pipelineRunDetailResponse{}
+	}
+	detail := &pipelinesvc.PipelineRunDetail{
+		Pipeline:  meta.Pipeline,
+		Workflows: meta.Workflows,
+		Steps:     meta.Steps,
+		Logs:      map[int64][]model.LogEntry{},
+	}
+	return buildPipelineRunDetailResponse(detail, login)
+}
+
+func buildPipelineStepLogsIncrementalResponse(result *pipelinesvc.PipelineStepLogsIncrementalResult) pipelineStepLogsIncrementalResponse {
+	if result == nil || result.Step == nil {
+		return pipelineStepLogsIncrementalResponse{}
+	}
+	items := make([]pipelineStepLog, 0, len(result.Entries))
+	for _, e := range result.Entries {
+		items = append(items, pipelineStepLog{
+			Line:    e.Line,
+			Type:    logTypeString(e.Type),
+			Time:    e.Time,
+			Content: string(e.Data),
+		})
+	}
+	return pipelineStepLogsIncrementalResponse{
+		Items:        items,
+		NextAfter:    result.NextAfter,
+		StepState:    result.Step.State,
+		StepStarted:  result.Step.Started,
+		StepFinished: result.Step.Finished,
+		ExitCode:     result.Step.ExitCode,
 	}
 }
 
@@ -844,7 +1035,11 @@ func (r *repoRouter) triggerPipeline(req *restful.Request, resp *restful.Respons
 
 	pipeline, err := r.services.Pipeline.TriggerManualPipeline(req.Request.Context(), repo, claims.Login, options, cfg)
 	if err != nil {
-		writeError(resp, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, pipelinesvc.ErrPipelineCommitRequired) {
+			status = http.StatusBadRequest
+		}
+		writeError(resp, status, err)
 		return
 	}
 
