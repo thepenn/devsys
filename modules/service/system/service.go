@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/thepenn/devsys/internal/naming"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/model"
 )
@@ -372,6 +373,9 @@ func (s *Service) CreateCertificate(ctx context.Context, cert *model.Certificate
 	if cert.Name == "" {
 		return nil, fmt.Errorf("certificate name is required")
 	}
+	if err := naming.ValidateHyphenSlug(cert.Name, naming.MaxCertificateNameLen); err != nil {
+		return nil, fmt.Errorf("certificate name: %w", err)
+	}
 	if cert.Type == "" {
 		return nil, fmt.Errorf("certificate type is required")
 	}
@@ -411,6 +415,11 @@ func (s *Service) UpdateCertificate(ctx context.Context, id int64, patch model.C
 			name := strings.TrimSpace(*patch.Name)
 			if name == "" {
 				return fmt.Errorf("certificate name is required")
+			}
+			if name != cert.Name {
+				if err := naming.ValidateHyphenSlug(name, naming.MaxCertificateNameLen); err != nil {
+					return fmt.Errorf("certificate name: %w", err)
+				}
 			}
 			cert.Name = name
 		}

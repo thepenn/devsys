@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   Button,
-  Card,
   Drawer,
   Form,
   Input,
@@ -22,6 +21,8 @@ import {
   deleteCertificate,
   getCertificate
 } from '../../api/system/certificates';
+import OpsPageCard from '../../components/OpsPageCard';
+import { hyphenSlugFormRules, MAX_CERTIFICATE_NAME_LEN } from '../../utils/hyphenSlug';
 import './certificate.less';
 import TablePagination from '../../components/TablePagination';
 
@@ -294,8 +295,8 @@ const Certificate = () => {
 
   return (
     <div className="ops-certificate">
-      <Card
-        title="凭证管理"
+      <OpsPageCard
+        title="系统管理 · 凭证管理"
         extra={
           <Space>
             <Input.Search
@@ -339,7 +340,7 @@ const Certificate = () => {
           }}
           className="table-pagination--flush"
         />
-      </Card>
+      </OpsPageCard>
 
       <Drawer
         title={editing ? '编辑凭证' : '新建凭证'}
@@ -359,9 +360,12 @@ const Certificate = () => {
           <Form.Item
             name="name"
             label="名称"
-            rules={[{ required: true, message: '请输入凭证名称' }]}
+            rules={hyphenSlugFormRules(MAX_CERTIFICATE_NAME_LEN, {
+              requiredMessage: '请输入凭证名称',
+              exemptNormalizedValue: editing?.name
+            })}
           >
-            <Input placeholder="例如：gitlab-token" />
+            <Input placeholder="例如：gitlab-token" maxLength={MAX_CERTIFICATE_NAME_LEN} autoComplete="off" />
           </Form.Item>
           <Form.Item
             name="type"

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, Drawer, Dropdown, Empty, Input, InputNumber, Modal, Select, Space, Spin, Switch, Table, Tabs, Tag, message } from 'antd';
+import { Button, Drawer, Dropdown, Empty, Input, InputNumber, Modal, Select, Space, Spin, Switch, Table, Tabs, Tag, message } from 'antd';
 import { EllipsisOutlined } from '@ant-design/icons';
 import { createStyles } from 'antd-style';
 import { Terminal } from 'xterm';
@@ -22,6 +22,7 @@ import {
 } from '../../api/admin/k8s';
 import { formatPodAge, formatTime } from '../../utils/time';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import { API_BASE_URL } from '../../utils/request';
 import { getToken } from '../../utils/auth';
 import K8sClusterGuard from './K8sClusterGuard';
@@ -1572,9 +1573,10 @@ const WorkloadsContent = ({ clusterId }) => {
 
   return (
     <>
-      <Card
+      <OpsPageCard
+      bodyVariant="tableFlush"
       className="workloads-card"
-      title="工作负载"
+      title="K8s 管理 · 工作负载"
       extra={
         <Space className="workloads-toolbar" size={12}>
           <Select
@@ -1635,7 +1637,7 @@ const WorkloadsContent = ({ clusterId }) => {
         }}
         className="table-pagination--flush"
       />
-      </Card>
+      </OpsPageCard>
       <Drawer
         className="workload-detail-drawer"
         width={1080}

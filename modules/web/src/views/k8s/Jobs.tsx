@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Card, Input, Select, Space, Table, Tabs, Tag, message } from 'antd';
+import { Input, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import { listNamespaces, listResources } from '../../api/admin/k8s';
 import { formatPodAge, formatTime } from '../../utils/time';
+import OpsPageCard from '../../components/OpsPageCard';
 import K8sClusterGuard from './K8sClusterGuard';
 import './resource-tables.less';
 
@@ -125,9 +126,9 @@ const JobsContent = ({ clusterId }) => {
   ];
 
   return (
-    <Card
-      className="k8s-resource-card"
-      title="计划任务"
+    <OpsPageCard
+      bodyVariant="tableFlush"
+      title="K8s 管理 · 计划任务"
       extra={
         <Space className="k8s-resource-toolbar">
           <Select style={{ width: 200 }} value={namespace} options={namespaceOptions} onChange={setNamespace} />
@@ -145,7 +146,7 @@ const JobsContent = ({ clusterId }) => {
       }
     >
       <Tabs items={tabs} />
-    </Card>
+    </OpsPageCard>
   );
 };
 

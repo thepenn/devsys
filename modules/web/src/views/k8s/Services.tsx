@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Card, Input, Select, Space, Table, Tabs, Tag, message } from 'antd';
+import { Input, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import { listNamespaces, listResources } from '../../api/admin/k8s';
 import { formatTime } from '../../utils/time';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import K8sClusterGuard from './K8sClusterGuard';
 import './resource-tables.less';
 
@@ -193,9 +194,9 @@ const ServiceRoutesContent = ({ clusterId }) => {
   ];
 
   return (
-    <Card
-      className="k8s-resource-card"
-      title="服务路由"
+    <OpsPageCard
+      bodyVariant="tableFlush"
+      title="K8s 管理 · 服务路由"
       extra={
         <Space className="k8s-resource-toolbar">
           <Select style={{ width: 200 }} value={namespace} options={namespaceOptions} onChange={setNamespace} />
@@ -213,7 +214,7 @@ const ServiceRoutesContent = ({ clusterId }) => {
       }
     >
       <Tabs items={tabs} />
-    </Card>
+    </OpsPageCard>
   );
 };
 

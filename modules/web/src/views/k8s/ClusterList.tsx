@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Card, Drawer, Empty, Form, Input, Modal, Space, Table, message } from 'antd';
+import { Button, Drawer, Empty, Form, Input, Modal, Space, Table, message } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { listClusters } from '../../api/admin/k8s';
 import { createCertificate, deleteCertificate, getCertificate, updateCertificate } from '../../api/system/certificates';
+import OpsPageCard from '../../components/OpsPageCard';
+import { hyphenSlugFormRules, MAX_CERTIFICATE_NAME_LEN } from '../../utils/hyphenSlug';
 import './cluster-list.less';
 
 const ClusterList = () => {
@@ -166,8 +168,8 @@ const ClusterList = () => {
 
   return (
     <div className="cluster-list">
-      <Card
-        title="K8s 集群列表"
+      <OpsPageCard
+        title="K8s 管理 · 集群列表"
         extra={
           <Space>
             <Input.Search
@@ -195,7 +197,7 @@ const ClusterList = () => {
           locale={{ emptyText: <Empty description="暂无集群" /> }}
           pagination={false}
         />
-      </Card>
+      </OpsPageCard>
 
       <Drawer
         title={editingCluster ? '编辑集群' : '添加集群'}
@@ -215,9 +217,12 @@ const ClusterList = () => {
           <Form.Item
             label="集群名称"
             name="name"
-            rules={[{ required: true, message: '请输入集群名称' }]}
+            rules={hyphenSlugFormRules(MAX_CERTIFICATE_NAME_LEN, {
+              requiredMessage: '请输入集群名称',
+              exemptNormalizedValue: editingCluster?.name
+            })}
           >
-            <Input placeholder="例如：prod-cluster" />
+            <Input placeholder="例如：prod-cluster" maxLength={MAX_CERTIFICATE_NAME_LEN} autoComplete="off" />
           </Form.Item>
           <Form.Item
             label="Kubeconfig"

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Checkbox, Drawer, Empty, Input, Modal, Select, Space, Spin, Table, Tabs, Tag, Tooltip, message } from 'antd';
+import { Alert, Button, Checkbox, Drawer, Empty, Input, Modal, Select, Space, Spin, Table, Tabs, Tag, Tooltip, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { listRepositories } from '../../api/project/repos';
@@ -10,6 +10,7 @@ import { emptyVariableRow, normalizeVariableRows, serializeVariableRows } from '
 import { itemsFromListResponse } from '../../utils/listResponse';
 import CodeEditor from '../../components/CodeEditor';
 import PipelineSourceEditor from '../../components/PipelineSourceEditor';
+import OpsPageCard from '../../components/OpsPageCard';
 import './project.less';
 
 const DEFAULT_PIPELINE_SETTINGS = {
@@ -287,7 +288,6 @@ const ProjectBuild = () => {
     }
   ];
 
-  const selectedRepoLabel = selectedRepo?.full_name || selectedRepo?.name;
   const openRunModal = () => {
     if (!selectedRepo) return;
     const lastCommit =
@@ -480,8 +480,8 @@ const ProjectBuild = () => {
   };
 
   return (
-    <Card
-      className="ops-project-card"
+    <OpsPageCard
+      bodyVariant="tableFlush"
       title="项目管理 · 项目构建"
       extra={
         <Space className="ops-project-toolbar">
@@ -512,26 +512,21 @@ const ProjectBuild = () => {
       {!selectedRepo ? (
         <Empty description="暂无同步项目，无法展示构建记录" />
       ) : (
-        <>
-          <div className="ops-project-selected">
-            当前项目：<strong>{selectedRepoLabel}</strong>
-          </div>
-          <Table
-            rowKey="id"
-            columns={columns}
-            loading={loadingRuns}
-            dataSource={runs}
-            className="ops-build-table"
-            pagination={{
-              current: page,
-              pageSize: perPage,
-              total,
-              showSizeChanger: false,
-              showTotal: value => `共 ${value} 条构建记录`,
-              onChange: target => fetchRuns(target)
-            }}
-          />
-        </>
+        <Table
+          rowKey="id"
+          columns={columns}
+          loading={loadingRuns}
+          dataSource={runs}
+          className="ops-build-table"
+          pagination={{
+            current: page,
+            pageSize: perPage,
+            total,
+            showSizeChanger: false,
+            showTotal: value => `共 ${value} 条构建记录`,
+            onChange: target => fetchRuns(target)
+          }}
+        />
       )}
 
       <Drawer
@@ -694,7 +689,7 @@ const ProjectBuild = () => {
           {runFormError && <Alert type="error" message={runFormError} showIcon />}
         </Space>
       </Modal>
-    </Card>
+    </OpsPageCard>
   );
 };
 

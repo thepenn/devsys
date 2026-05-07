@@ -16,6 +16,7 @@ import (
 
 	internalauth "github.com/thepenn/devsys/internal/auth"
 	"github.com/thepenn/devsys/internal/label"
+	"github.com/thepenn/devsys/internal/naming"
 	"github.com/thepenn/devsys/internal/store"
 	"github.com/thepenn/devsys/model"
 	messageService "github.com/thepenn/devsys/service/message"
@@ -86,6 +87,9 @@ func (s *Service) CreateRole(ctx context.Context, in RoleInput) (*model.Role, er
 	if label.IsBuiltinRole(name) {
 		return nil, fmt.Errorf("role name %q conflicts with built-in role", name)
 	}
+	if err := naming.ValidateHyphenSlug(name, naming.MaxRoleNameLen); err != nil {
+		return nil, fmt.Errorf("role name: %w", err)
+	}
 	now := time.Now().Unix()
 	role := model.Role{
 		Name:    name,
@@ -131,6 +135,9 @@ func (s *Service) UpdateRole(ctx context.Context, id int64, in RoleInput) (*mode
 			if name := strings.TrimSpace(in.Name); name != "" && name != existing.Name {
 				if label.IsBuiltinRole(name) {
 					return fmt.Errorf("role name %q conflicts with built-in role", name)
+				}
+				if err := naming.ValidateHyphenSlug(name, naming.MaxRoleNameLen); err != nil {
+					return fmt.Errorf("role name: %w", err)
 				}
 				updates["name"] = name
 			}

@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
-  Card,
   Empty,
   List,
   message as antdMessage,
@@ -16,6 +15,7 @@ import {
 import { CheckOutlined, ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { listMessages, markAllRead, markRead } from '../../api/system/messages';
+import OpsPageCard, { opsPageTitle } from '../../components/OpsPageCard';
 
 const { Text, Paragraph } = Typography;
 
@@ -100,9 +100,8 @@ const MessageNotification = () => {
   ], [data.unread]);
 
   return (
-    <Card
-      title="消息通知"
-      bordered={false}
+    <OpsPageCard
+      title={opsPageTitle('消息通知', '消息通知')}
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => load(tab, data.page)} loading={loading}>
@@ -173,7 +172,7 @@ const MessageNotification = () => {
           )}
         />
       )}
-    </Card>
+    </OpsPageCard>
   );
 };
 

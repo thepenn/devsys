@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Card, Form, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, message } from 'antd';
+import { Button, Form, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, message } from 'antd';
 import { PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -9,6 +9,7 @@ import { formatTime } from '../../utils/time';
 import { itemsFromListResponse } from '../../utils/listResponse';
 import { formatPipelineStatus, getPipelineStatusClass } from '../../constants/pipeline';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import '../pipelineTemplates/pipeline-templates.less';
 import './pipeline-jobs.less';
 
@@ -217,9 +218,9 @@ const PipelineJobList = () => {
   );
 
   return (
-    <Card
+    <OpsPageCard
       className="pipeline-template-card"
-      title="项目管理 · 独立 Pipeline Job"
+      title="通用 Pipeline · 独立 Job"
       extra={
         <Space size={12}>
           <Input.Search
@@ -290,7 +291,7 @@ const PipelineJobList = () => {
           </Form.Item>
         </Form>
       </Modal>
-    </Card>
+    </OpsPageCard>
   );
 };
 

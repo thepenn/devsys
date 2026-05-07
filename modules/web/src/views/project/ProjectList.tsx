@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Checkbox, Drawer, Input, Modal, Segmented, Space, Spin, Table, Tabs, Tag, Tooltip, message } from 'antd';
+import { Alert, Button, Checkbox, Drawer, Input, Modal, Segmented, Space, Spin, Table, Tabs, Tag, Tooltip, message } from 'antd';
 import { ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { listRepositories, syncRepositories, syncRepository } from '../../api/project/repos';
@@ -10,6 +10,7 @@ import { itemsFromListResponse } from '../../utils/listResponse';
 import TablePagination from '../../components/TablePagination';
 import CodeEditor from '../../components/CodeEditor';
 import PipelineSourceEditor from '../../components/PipelineSourceEditor';
+import OpsPageCard from '../../components/OpsPageCard';
 import './project.less';
 
 const SYNC_OPTIONS = [
@@ -431,8 +432,8 @@ const ProjectList = () => {
 
   return (
     <>
-      <Card
-      className="ops-project-card"
+      <OpsPageCard
+      bodyVariant="tableFlush"
       title="项目管理 · 项目列表"
       extra={
         <Space size={12} className="ops-project-toolbar">
@@ -475,7 +476,7 @@ const ProjectList = () => {
         }}
         className="table-pagination--flush"
       />
-    </Card>
+    </OpsPageCard>
       <Drawer
         title={configRepo ? `配置流水线 · ${configRepo.full_name || configRepo.name}` : '配置流水线'}
         open={configDrawerVisible}

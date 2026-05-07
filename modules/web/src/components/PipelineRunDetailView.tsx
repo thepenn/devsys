@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, Empty, Input, Modal, Space, Spin, Switch, Tag, Tooltip, message } from 'antd';
+import { Button, Card, Empty, Input, Modal, Space, Spin, Tag, Tooltip, message } from 'antd';
 import { ReloadOutlined, ArrowLeftOutlined, StopOutlined, CopyOutlined, RedoOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
 import {
@@ -111,7 +111,6 @@ const PipelineRunDetailView = ({
   const [replaying, setReplaying] = useState(false);
   const [approvalModal, setApprovalModal] = useState({ visible: false, step: null, action: 'approve', comment: '' });
   const [mergedDetail, setMergedDetail] = useState(null);
-  const [liveRefresh, setLiveRefresh] = useState(true);
 
   useEffect(() => {
     if (!livePoll) {
@@ -274,13 +273,13 @@ const PipelineRunDetailView = ({
   const selectedLogText = useMemo(() => buildStepLogText(selectedStep), [selectedStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!liveRefresh || !logViewportRef.current) return;
+    if (!logViewportRef.current) return;
     const el = logViewportRef.current;
     el.scrollTop = el.scrollHeight;
-  }, [selectedLogText, liveRefresh, currentStepId]);
+  }, [selectedLogText, currentStepId]);
 
   useEffect(() => {
-    if (!livePoll?.fetchMeta || !liveRefresh) return;
+    if (!livePoll?.fetchMeta) return;
     const tick = async () => {
       const d = displayRef.current;
       if (!d?.pipeline?.id || !isPipelineStatusActive(d.pipeline.status)) return;
@@ -295,10 +294,10 @@ const PipelineRunDetailView = ({
     const id = window.setInterval(tick, 3000);
     void tick();
     return () => window.clearInterval(id);
-  }, [livePoll, liveRefresh, detail?.pipeline?.id]);
+  }, [livePoll, detail?.pipeline?.id]);
 
   useEffect(() => {
-    if (!livePoll?.fetchLogs || !liveRefresh) return;
+    if (!livePoll?.fetchLogs) return;
 
     if (livePoll.buildStreamUrl) {
       const ac = new AbortController();
@@ -348,7 +347,7 @@ const PipelineRunDetailView = ({
       }
     }, 2000);
     return () => window.clearInterval(iv);
-  }, [livePoll, liveRefresh, currentStepId, detail?.pipeline?.id]);
+  }, [livePoll, currentStepId, detail?.pipeline?.id]);
 
   const summaryItems = [
     {
@@ -384,14 +383,6 @@ const PipelineRunDetailView = ({
           <Button icon={<ReloadOutlined />} onClick={onReload} loading={loading}>
             刷新
           </Button>
-        )}
-        {livePoll && (
-          <Tooltip title="关闭后不再自动拉取运行状态与日志">
-            <Space>
-              <span>实时刷新</span>
-              <Switch checked={liveRefresh} onChange={setLiveRefresh} />
-            </Space>
-          </Tooltip>
         )}
         {replayable && (
           <Button

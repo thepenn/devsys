@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, Drawer, Dropdown, Input, Select, Space, Table, Tag, message } from 'antd';
+import { Button, Drawer, Dropdown, Input, Select, Space, Table, Tag, message } from 'antd';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
 import { listNamespaces, listResources } from '../../api/admin/k8s';
 import { formatPodAge, formatTime } from '../../utils/time';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import K8sClusterGuard from './K8sClusterGuard';
 import { API_BASE_URL } from '../../utils/request';
 import { getToken } from '../../utils/auth';
@@ -352,9 +353,9 @@ const PodsContent = ({ clusterId }) => {
 
   return (
     <>
-      <Card
-        className="k8s-resource-card"
-        title="Pods"
+      <OpsPageCard
+        bodyVariant="tableFlush"
+        title="K8s 管理 · Pods"
         extra={
           <Space className="k8s-resource-toolbar">
             <Select style={{ width: 200 }} value={namespace} options={namespaceOptions} onChange={setNamespace} />
@@ -389,7 +390,7 @@ const PodsContent = ({ clusterId }) => {
           }}
           className="table-pagination--flush"
         />
-      </Card>
+      </OpsPageCard>
 
       <Drawer
         className="pod-terminal-drawer"

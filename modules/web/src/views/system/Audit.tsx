@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Button,
-  Card,
   DatePicker,
   Form,
   Input,
@@ -15,6 +14,7 @@ import {
 import { ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { listAuditLogs } from '../../api/system/audit';
+import OpsPageCard, { opsPageTitle } from '../../components/OpsPageCard';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -154,9 +154,8 @@ const SystemAudit = () => {
   ], []);
 
   return (
-    <Card
-      title="操作审计"
-      bordered={false}
+    <OpsPageCard
+      title={opsPageTitle('系统管理', '操作审计')}
       extra={
         <Button icon={<ReloadOutlined />} onClick={() => load(params)} loading={loading}>
           刷新
@@ -202,7 +201,7 @@ const SystemAudit = () => {
           onChange: (page, pageSize) => load({ ...params, page, per_page: pageSize })
         }}
       />
-    </Card>
+    </OpsPageCard>
   );
 };
 

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Card, Form, Input, Modal, Popconfirm, Radio, Segmented, Space, Table, Tag, Tooltip, message } from 'antd';
+import { Button, Form, Input, Modal, Popconfirm, Radio, Segmented, Space, Table, Tag, Tooltip, message } from 'antd';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -8,6 +8,7 @@ import { createTemplate, deleteTemplate, listTemplates } from '../../api/system/
 import { formatTime } from '../../utils/time';
 import { itemsFromListResponse } from '../../utils/listResponse';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import './pipeline-templates.less';
 
 const TEMPLATE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
@@ -213,9 +214,9 @@ const PipelineTemplateList = () => {
   );
 
   return (
-    <Card
+    <OpsPageCard
       className="pipeline-template-card"
-      title="项目管理 · 通用 Pipeline 模板"
+      title="通用 Pipeline · 模板管理"
       extra={
         <Space size={12}>
           <Segmented
@@ -306,7 +307,7 @@ const PipelineTemplateList = () => {
           </Form.Item>
         </Form>
       </Modal>
-    </Card>
+    </OpsPageCard>
   );
 };
 

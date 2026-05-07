@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Card, Input, Space, Table, Tag, message } from 'antd';
+import { Input, Space, Table, Tag, message } from 'antd';
 import { listResources } from '../../api/admin/k8s';
 import { formatPodAge, formatTime } from '../../utils/time';
 import TablePagination from '../../components/TablePagination';
+import OpsPageCard from '../../components/OpsPageCard';
 import K8sClusterGuard from './K8sClusterGuard';
 import './resource-tables.less';
 
@@ -68,9 +69,9 @@ const NodesContent = ({ clusterId }) => {
   ];
 
   return (
-    <Card
-      className="k8s-resource-card"
-      title="节点管理"
+    <OpsPageCard
+      bodyVariant="tableFlush"
+      title="K8s 管理 · 节点管理"
       extra={
         <Space className="k8s-resource-toolbar">
           <Input.Search
@@ -97,7 +98,7 @@ const NodesContent = ({ clusterId }) => {
         }}
         className="table-pagination--flush"
       />
-    </Card>
+    </OpsPageCard>
   );
 };
 

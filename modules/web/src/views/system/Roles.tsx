@@ -27,8 +27,10 @@ import {
   listUserRoles,
   updateRole
 } from '../../api/system/rbac';
+import OpsPageCard, { opsPageTitle } from '../../components/OpsPageCard';
+import { hyphenSlugFormRules, MAX_ROLE_NAME_LEN } from '../../utils/hyphenSlug';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 // 同后端 internal/label/label.go 中的内置 role 名
 const BUILTIN_ROLE_TITLES = {
@@ -183,9 +185,17 @@ const RolesPanel = ({ roles, labels, onChanged }) => {
           <Form.Item
             name="name"
             label="角色名 (英文标识)"
-            rules={[{ required: true, message: '请填写角色名' }]}
+            rules={hyphenSlugFormRules(MAX_ROLE_NAME_LEN, {
+              requiredMessage: '请填写角色名',
+              exemptNormalizedValue: editing && !editing.builtin ? editing.name : null
+            })}
           >
-            <Input placeholder="例如 db-readonly" disabled={!!editing && editing.builtin} />
+            <Input
+              placeholder="例如 db-readonly"
+              maxLength={MAX_ROLE_NAME_LEN}
+              autoComplete="off"
+              disabled={!!editing && editing.builtin}
+            />
           </Form.Item>
           <Form.Item name="title" label="显示名称">
             <Input placeholder="例如 数据库只读" />
@@ -394,9 +404,8 @@ const SystemRoles = () => {
   }, [refresh]);
 
   return (
-    <Card loading={loading} bordered={false}>
-      <Title level={4} style={{ marginTop: 0 }}>角色与权限</Title>
-      <Text type="secondary">
+    <OpsPageCard title={opsPageTitle('系统管理', '角色管理')} loading={loading}>
+      <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
         权限链路: OAuth 登录 → 用户 → 角色 → label → 接口 (METHOD + Path).
         admin / superadmin 角色不可删除; superadmin 拥有 <Text code>*</Text> 通配 label.
       </Text>
@@ -421,7 +430,7 @@ const SystemRoles = () => {
           }
         ]}
       />
-    </Card>
+    </OpsPageCard>
   );
 };
 
